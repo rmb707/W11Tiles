@@ -33,8 +33,18 @@ const DWMWA_WINDOW_CORNER_PREFERENCE:     DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUT
 const DWMWA_SYSTEMBACKDROP_TYPE:          DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(38);
 
 /// `DWM_WINDOW_CORNER_PREFERENCE::DWMWCP_ROUND` — Win11's standard
-/// rounded corner radius. `2` per the SDK header.
+/// rounded corner radius. `2` per the SDK header. Used for our overlay
+/// chrome (tab strip, drop zones) where the rounded edge is part of
+/// the visual identity.
 const DWMWCP_ROUND: u32 = 2;
+
+/// `DWM_WINDOW_CORNER_PREFERENCE::DWMWCP_DONOTROUND` = 1. Forces square
+/// corners on a window. Used for *managed* (tiled) windows so adjacent
+/// tiles touch edge-to-edge without DWM's rounded-corner shadow halo
+/// creating a visible "gap" between them. The halo is ~6 px per side
+/// on rounded windows; turning it off is what gives the tiled grid
+/// its tight i3/Hyprland look.
+const DWMWCP_DONOTROUND: u32 = 1;
 
 /// `DWM_SYSTEMBACKDROP_TYPE::DWMSBT_TRANSIENTWINDOW` = 3 (Acrylic). Picks
 /// up the desktop background through a frosted blur. The other choice
@@ -46,6 +56,13 @@ const DWMSBT_TRANSIENTWINDOW: u32 = 3;
 
 /// Apply our preferred DWM settings to a managed window. Safe to call
 /// every layout pass; both attribute writes are cheap and idempotent.
+///
+/// We force *square* corners (`DWMWCP_DONOTROUND`) here, not rounded.
+/// Tiled windows live edge-to-edge in the BSP grid; the default Win11
+/// rounded corners come with a ~6 px shadow halo on every side, which
+/// reads as a visible "gap" between adjacent tiles. Square corners
+/// eliminate the halo, so adjacent tiles butt up against each other
+/// the way an i3 / Hyprland layout does.
 pub fn prepare_window(hwnd: HWND) {
     unsafe {
         let disabled: BOOL = BOOL(1);
@@ -55,11 +72,11 @@ pub fn prepare_window(hwnd: HWND) {
             &disabled as *const _ as *const _,
             std::mem::size_of::<BOOL>() as u32,
         );
-        let round: u32 = DWMWCP_ROUND;
+        let square: u32 = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
-            &round as *const _ as *const _,
+            &square as *const _ as *const _,
             std::mem::size_of::<u32>() as u32,
         );
     }
