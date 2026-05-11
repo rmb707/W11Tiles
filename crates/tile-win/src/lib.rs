@@ -20,6 +20,7 @@ pub mod tab_strip;
 pub mod drop_zones;
 pub mod tray;
 pub mod dwm_polish;
+pub mod icon;
 
 #[cfg(windows)]
 pub use hook::EventHook;

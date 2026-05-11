@@ -316,11 +316,15 @@ fn add_tray_icon(hwnd: HWND) -> Result<(), String> {
     let mut data = base_notify_data(hwnd);
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = WM_TILETRAY_CALLBACK;
-    // Generic application icon for v1. Replace with a custom .ico via
-    // `LoadImageW(..., IMAGE_ICON, ..., LR_LOADFROMFILE)` once we ship
-    // a binary asset. The public API doesn't change — only this line.
-    data.hIcon = unsafe {
-        LoadIconW(None, IDI_APPLICATION).map_err(|e| format!("LoadIconW: {e}"))?
+    // Try our runtime-generated "TM" monogram first (accent square, white
+    // bold letters). Fall back to the generic Win32 IDI_APPLICATION if
+    // the GDI render fails for any reason — Shell_NotifyIcon requires a
+    // valid HICON to register at all.
+    data.hIcon = match crate::icon::create_app_icon() {
+        Some(h) => h,
+        None => unsafe {
+            LoadIconW(None, IDI_APPLICATION).map_err(|e| format!("LoadIconW: {e}"))?
+        },
     };
     copy_tip_into(&mut data.szTip, TOOLTIP);
 
