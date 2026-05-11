@@ -229,15 +229,16 @@ async fn run() -> Result<()> {
     let mut cursor_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     cursor_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // 500ms reconcile tick. Runs when nothing is animating to catch
-    // windows that drifted out of their tile cell without firing any
-    // event we'd normally hook — the common case is a user exiting
-    // fullscreen with Esc/F11: the app changes its rect via internal
-    // SetWindowPos, we don't see a hook event, and the window stays at
-    // its old fullscreen-restore position until something forces a
-    // repaint. This reconcile makes the snap-back happen within 500ms
-    // of the exit. Cheap (Win32 SetWindowPos to current rect is a no-op).
-    let mut reconcile_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    // 250ms reconcile tick. Runs when nothing is animating AND no drag
+    // is in flight, to catch windows that drifted out of their tile cell
+    // without firing any event we'd normally hook. Two common cases:
+    //   1. User exited fullscreen via Esc/F11 — the app restored its
+    //      rect via internal SetWindowPos and we never saw an event.
+    //   2. Some apps (Slack-in-tray, OBS, others) re-assert their own
+    //      position after we tile them.
+    // The reconcile pulls them back into the layout within ~250ms.
+    // Cheap (Win32 SetWindowPos to current rect is essentially free).
+    let mut reconcile_tick = tokio::time::interval(std::time::Duration::from_millis(250));
     reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dragging_src: Option<tile_core::WindowId> = None;
 
@@ -338,15 +339,13 @@ async fn run() -> Result<()> {
                     let _ = applier.apply(&frame);
                 }
             }
-            _ = reconcile_tick.tick(), if !animator.is_animating() => {
-                // Snap-back any window that drifted out of its tile cell
-                // since our last apply. Primary case: user exited
-                // fullscreen with Esc/F11 — the app restored its own
-                // rect, no event fired we could hook, and the window
-                // sits at its pre-fullscreen position. Calling
-                // applier.apply with the current plan re-snaps it.
-                // No-op for windows already at the right rect (Win32
-                // SetWindowPos to the same coords is essentially free).
+            _ = reconcile_tick.tick(), if !animator.is_animating() && dragging_src.is_none() => {
+                // Snap-back any window that drifted. The drag-guard is
+                // critical: without it, the reconcile would fight a
+                // user's active drag by repeatedly snapping the window
+                // back to its tile cell mid-drag. We only reconcile when
+                // both (a) no tween is in flight and (b) the user isn't
+                // dragging anything.
                 let _ = applier.apply(&combined_plan(&state, &map));
             }
             _ = &mut shutdown => {
@@ -606,18 +605,16 @@ fn handle_hook_event(
                     handle_event(state, applier, animator, map,CoreEvent::DropAtEdge { src, target: target_id, edge });
                 }
                 None => {
-                    // Tab-group members are sticky: a stray drag-release on
-                    // blank space should NOT yank them out of the group. The
-                    // user explicitly opts to untab via the strip's button
-                    // or the SUPER+ALT+U keybind. So if the dragged window
-                    // is in a tab group, snap it back; otherwise float.
-                    if state.is_in_tab_group(src) {
-                        info!(src=%src, "drag ended on blank — snap back to tab group");
-                        animator.set_target(combined_plan(state, map), std::time::Instant::now());
-                    } else {
-                        info!(src=%src, cursor=?(cursor_x, cursor_y), "drag ended on blank/self — floating");
-                        handle_event(state, applier, animator, map,CoreEvent::WindowFloated { id: src });
-                    }
+                    // Tiles are sticky. Drag-release on blank space — or
+                    // on the window's own cell — never floats. The window
+                    // snaps back to its existing tile slot. The only way
+                    // to take a window OUT of the layout is the explicit
+                    // SUPER+ALT+SPACE keybind (Action::ToggleFloat).
+                    // Tab-group members get the same treatment for the
+                    // same reason — popping a tab out is the SUPER+ALT+U
+                    // keybind, not an accidental drag.
+                    info!(src=%src, cursor=?(cursor_x, cursor_y), "drag ended on blank/self — snap back");
+                    animator.set_target(combined_plan(state, map), std::time::Instant::now());
                 }
             }
         }
