@@ -177,9 +177,18 @@ impl Animator {
     }
 }
 
+/// Smoothstep-5 (a.k.a. "smootherstep"). Ken Perlin's `6t^5 - 15t^4 + 10t^3`.
+///
+/// Both its first and second derivatives are zero at `t=0` and `t=1`, so
+/// motion *starts* gently, accelerates through the middle, and *settles*
+/// gently — no perceptible "snap-stop" tail. The previous ease-out cubic
+/// only had a zero first derivative at the end; mathematically that's
+/// enough but in practice the eye picks up the discontinuity in the
+/// second derivative as a tiny twitch right before the window arrives.
+/// Apple's `easeInOutCubic` swap-in feels like this; ours matches.
 fn ease_out_cubic(t: f32) -> f32 {
-    let inv = 1.0 - t;
-    1.0 - inv * inv * inv
+    let t = t.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
 /// Linearly interpolate every component then round once at the very end.
@@ -276,18 +285,29 @@ mod tests {
         a.set_target(plan(&[(1, Rect::new(200, 0, 100, 100))]), now);
         assert!(a.is_animating());
 
-        // At t=0.5 of duration we should be partway between 0 and 200 in x.
-        let mid = a.tick(at(now, 100)).expect("mid frame");
-        let r = rect_for(&mid, 1);
-        // ease-out cubic at t=0.5 → 1 - 0.5^3 = 0.875, so x ≈ 175.
-        // The test spec only asks for "somewhere in between" within ±100.
-        assert!(r.x > 100, "x should be past midpoint due to ease-out, got {}", r.x);
-        assert!(r.x < 200, "x should not have arrived yet, got {}", r.x);
-        assert!((r.x - 100).abs() <= 100);
+        // Sample at t=0.25 of duration (50ms in for our 200ms anim).
+        // Smoothstep-5 is symmetric — at exactly t=0.5 the position is
+        // also exactly 0.5 (x ≈ 100), so checking the midpoint can't
+        // distinguish "mid-tween" from "stuck at midpoint." Sampling
+        // off-center makes the assertion meaningful: at t=0.25 the
+        // curve has only advanced ~0.10, so x should be a small bit
+        // past origin but nowhere near 100.
+        let early = a.tick(at(now, 50)).expect("early frame");
+        let r_early = rect_for(&early, 1);
+        assert!(r_early.x > 0,   "x should be moving, got {}", r_early.x);
+        assert!(r_early.x < 100, "x should not be at midpoint yet, got {}", r_early.x);
+
+        // Late sample at t=0.75 — by smoothstep's symmetry, position
+        // should be ≈ 0.90, i.e., x in (150, 200).
+        let late = a.tick(at(now, 150)).expect("late frame");
+        let r_late = rect_for(&late, 1);
+        assert!(r_late.x > r_early.x, "should keep moving forward");
+        assert!(r_late.x < 200, "should not have arrived yet, got {}", r_late.x);
+
         // Other dims are equal in prev/target so they shouldn't drift.
-        assert_eq!(r.y, 0);
-        assert_eq!(r.width, 100);
-        assert_eq!(r.height, 100);
+        assert_eq!(r_late.y, 0);
+        assert_eq!(r_late.width, 100);
+        assert_eq!(r_late.height, 100);
     }
 
     #[test]
@@ -423,12 +443,18 @@ mod tests {
     }
 
     #[test]
-    fn ease_out_cubic_endpoints() {
+    fn ease_curve_endpoints_and_symmetry() {
         // Sanity-check the curve so a future refactor doesn't silently
-        // swap us back to linear.
+        // swap us back to linear or ease-out. Smoothstep-5 has zero
+        // first AND second derivatives at both endpoints (the property
+        // that kills the visible "snap-stop" the old ease-out had).
         assert!((ease_out_cubic(0.0) - 0.0).abs() < 1e-6);
         assert!((ease_out_cubic(1.0) - 1.0).abs() < 1e-6);
-        // Decelerating: at t=0.5 we're already past 0.5.
-        assert!(ease_out_cubic(0.5) > 0.5);
+        // Symmetric — slow start, fast middle, slow end.
+        assert!((ease_out_cubic(0.5) - 0.5).abs() < 1e-6);
+        // First derivative is zero at the endpoints; numerical check via
+        // a small step away from each end.
+        assert!(ease_out_cubic(0.01).abs() < 0.001, "should barely move at the start");
+        assert!((ease_out_cubic(0.99) - 1.0).abs() < 0.001, "should barely move at the end");
     }
 }

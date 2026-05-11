@@ -19,6 +19,7 @@ pub mod vdesktop;
 pub mod tab_strip;
 pub mod drop_zones;
 pub mod tray;
+pub mod dwm_polish;
 
 #[cfg(windows)]
 pub use hook::EventHook;

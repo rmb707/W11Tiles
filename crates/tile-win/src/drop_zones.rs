@@ -269,6 +269,11 @@ fn create_overlay(zone: DropZone) -> Option<Box<Overlay>> {
         // underlying tile content stays visible during drag.
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), ZONE_ALPHA, LWA_ALPHA);
     }
+    // Win11-native chrome: rounded corners + Acrylic backdrop. The
+    // colored region fills get a frosted blur of the wallpaper through
+    // them — feels far less heavy than the flat painted rectangles.
+    crate::dwm_polish::polish_overlay(hwnd);
+
     let mut overlay = Box::new(Overlay { hwnd, hot: zone.hot });
     let ptr = &mut *overlay as *mut Overlay;
     unsafe {

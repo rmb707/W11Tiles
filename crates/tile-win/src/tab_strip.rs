@@ -352,6 +352,11 @@ fn create_overlay(strip: StripDescriptor) -> Option<Box<Overlay>> {
     unsafe {
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), STRIP_ALPHA, LWA_ALPHA);
     }
+    // Win11-native chrome: rounded corners + Acrylic backdrop + dark
+    // immersive mode. No-op on pre-22H2; on Win11 22H2+ the strip picks
+    // up the wallpaper's tint through a frosted blur, the same way the
+    // taskbar and command bars do.
+    crate::dwm_polish::polish_overlay(hwnd);
 
     let mut overlay = Box::new(Overlay { hwnd, descriptor: strip });
     let ptr = &mut *overlay as *mut Overlay;

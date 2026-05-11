@@ -89,6 +89,12 @@ impl Applier {
                     debug!(window=%p.window, w, h, "skipping degenerate placement");
                     continue;
                 }
+                // Disable the OS's built-in window-move/resize animation
+                // on this window, every pass. Otherwise Windows wraps our
+                // SetWindowPos in its own "shove" animation that stacks
+                // on top of our animator's tween — gummy double-bounce.
+                // Idempotent and microseconds; cheap to call every frame.
+                crate::dwm_polish::prepare_window(hwnd);
                 // No SWP_NOZORDER: we *want* the call to also raise the
                 // window in Z-order. Plan-order then becomes Z-order, so
                 // tab groups (where multiple tabs share the same rect)
