@@ -605,13 +605,19 @@ fn handle_hook_event(
             // can aim deliberately.
             let target = find_drop_target(state, cursor_x, cursor_y, src);
             match target {
-                Some((target_id, DropZoneKind::Center)) => {
+                Some(DropTarget::Tile { window: target_id, kind: DropZoneKind::Center }) => {
                     info!(src=%src, target=%target_id, cursor=?(cursor_x, cursor_y), "drag-merge (tab)");
                     handle_event(state, applier, animator, map,CoreEvent::MergeWindows { src, target: target_id });
                 }
-                Some((target_id, DropZoneKind::Edge(edge))) => {
+                Some(DropTarget::Tile { window: target_id, kind: DropZoneKind::Edge(edge) }) => {
                     info!(src=%src, target=%target_id, ?edge, "drag-tile (split)");
                     handle_event(state, applier, animator, map,CoreEvent::DropAtEdge { src, target: target_id, edge });
+                }
+                Some(DropTarget::Monitor { id: target_mon }) => {
+                    info!(src=%src, monitor=%target_mon, "drag to different monitor — moving");
+                    handle_event(state, applier, animator, map, CoreEvent::MoveWindowToMonitor {
+                        window: src, monitor: target_mon,
+                    });
                 }
                 None => {
                     // Tiles are sticky. Drag-release on blank space — or
@@ -651,7 +657,7 @@ fn build_hot_drop_zones(
         for p in &plan.placements {
             if p.window == src { continue; }
             let hot = match target {
-                Some((id, kind)) if id == p.window => match kind {
+                Some(DropTarget::Tile { window: id, kind }) if id == p.window => match kind {
                     DropZoneKind::Center                       => tile_win::drop_zones::HotZone::Center,
                     DropZoneKind::Edge(tile_core::Edge::Top)    => tile_win::drop_zones::HotZone::Top,
                     DropZoneKind::Edge(tile_core::Edge::Bottom) => tile_win::drop_zones::HotZone::Bottom,
@@ -677,15 +683,32 @@ enum DropZoneKind {
 }
 
 /// Cell hit-test: which tile + which sub-zone of that tile contains the
-/// cursor? Returns `None` if cursor is outside every tile or if the only
-/// tile under cursor is `exclude` (the dragged window itself).
+/// Result of cursor hit-testing a drag-end against the current layout.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum DropTarget {
+    /// Cursor landed on a specific tile's sub-zone — merge or split.
+    Tile { window: tile_core::WindowId, kind: DropZoneKind },
+    /// Cursor landed on a *different* monitor than the source — move
+    /// the dragged window to that monitor's active workspace. Hits the
+    /// case where the user drags across screens onto blank area, or
+    /// onto a tile on a different monitor that we treat as "place this
+    /// over there" rather than "merge with that specific window".
+    Monitor { id: tile_core::state::MonitorId },
+}
+
+/// cursor? Returns `None` only when the cursor is on the source's own
+/// monitor and not on a tile — that case snaps back. Cross-monitor
+/// drags always produce *some* target (either a tile or the destination
+/// monitor itself).
 #[cfg(windows)]
 fn find_drop_target(
     state: &State,
     x: i32,
     y: i32,
     exclude: tile_core::WindowId,
-) -> Option<(tile_core::WindowId, DropZoneKind)> {
+) -> Option<DropTarget> {
+    let src_mon = state.locations.get(&exclude).map(|(m, _)| *m);
     for mon in &state.monitors {
         if !mon.bounds.contains_point(x, y) { continue; }
         let plan = mon.active().compute(mon.work_area);
@@ -705,8 +728,17 @@ fn find_drop_target(
                 (1, 2) => DropZoneKind::Edge(tile_core::Edge::Bottom),
                 _      => DropZoneKind::Center, // unreachable, satisfies match
             };
-            return Some((p.window, kind));
+            return Some(DropTarget::Tile { window: p.window, kind });
         }
+        // Cursor is on this monitor but not on any tile. Two cases:
+        //   1. Different monitor than source → user wants the window
+        //      moved over here. Return Monitor.
+        //   2. Same monitor as source → user wanted to drop on a tile
+        //      but missed. Snap-back (return None).
+        if src_mon != Some(mon.id) {
+            return Some(DropTarget::Monitor { id: mon.id });
+        }
+        return None;
     }
     None
 }

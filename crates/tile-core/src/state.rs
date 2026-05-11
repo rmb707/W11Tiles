@@ -119,6 +119,10 @@ pub enum Event {
     /// beside `target`, splitting along the edge direction. Center drops
     /// go to `MergeWindows`; this event handles the four cardinal edges.
     DropAtEdge      { src: WindowId, target: WindowId, edge: Edge },
+    /// Move `window` to a different monitor's active workspace. Emitted
+    /// when the user drags a window onto a different monitor's empty
+    /// area (or any non-tile area on a different monitor).
+    MoveWindowToMonitor { window: WindowId, monitor: MonitorId },
     Quit,
 }
 
@@ -385,11 +389,17 @@ impl State {
             Event::SwitchWorkspace { id: target } => {
                 let outer_gap = self.config.outer_gap;
                 let inner_gap = self.config.inner_gap;
-                if let Some(mon_id) = self.focused_monitor {
+                // Windows virtual desktops are MACHINE-WIDE: when the user
+                // hits Ctrl+Win+Right, every monitor flips to the same VD
+                // simultaneously. Earlier we only updated the focused
+                // monitor — that left secondary monitors stuck on the
+                // previous VD's workspace, so their BSP trees thought
+                // those cloaked-but-still-tracked windows were occupying
+                // the tile slots. Flipping every monitor keeps our state
+                // consistent with what the OS is showing the user.
+                let mon_ids: Vec<MonitorId> = self.monitors.iter().map(|m| m.id).collect();
+                for mon_id in mon_ids {
                     if let Some(mon) = self.monitor_mut(mon_id) {
-                        // Ensure the workspace exists — when the daemon
-                        // observes a virtual-desktop switch it tells us to
-                        // switch to a workspace we may not have seen yet.
                         let _ = mon.ensure_workspace(target, outer_gap, inner_gap);
                         mon.active_workspace = target;
                         out.dirty_monitors.push(mon_id);
@@ -501,6 +511,41 @@ impl State {
                             }
                         }
                     }
+                }
+            }
+            Event::MoveWindowToMonitor { window, monitor: target_mon } => {
+                // Drag-to-different-monitor. Pull `window` out of its
+                // current monitor's BSP tree, insert into the target
+                // monitor's active workspace.
+                let Some((cur_mon, cur_ws)) = self.locations.get(&window).copied() else {
+                    return Ok(out);
+                };
+                if cur_mon == target_mon { return Ok(out); }
+                // Remove from current monitor's workspace.
+                if let Some(mon) = self.monitor_mut(cur_mon) {
+                    if let Some(ws) = mon.workspaces.iter_mut().find(|w| w.id == cur_ws) {
+                        ws.layout.remove(window);
+                        if ws.focused == Some(window) {
+                            ws.focused = ws.layout.windows().last().copied();
+                        }
+                    }
+                    out.dirty_monitors.push(cur_mon);
+                }
+                // Insert into target monitor's *currently-active* workspace.
+                // With multi-monitor SwitchWorkspace flipping all monitors
+                // together, this is the same workspace id as cur_ws — but
+                // we re-read it from the target monitor for correctness.
+                let outer_gap = self.config.outer_gap;
+                let inner_gap = self.config.inner_gap;
+                if let Some(mon) = self.monitor_mut(target_mon) {
+                    let target_ws = mon.active_workspace;
+                    let work_area = mon.work_area;
+                    let ws = mon.ensure_workspace(target_ws, outer_gap, inner_gap);
+                    let near = ws.focused;
+                    ws.layout.insert(window, near, work_area);
+                    ws.focused = Some(window);
+                    self.locations.insert(window, (target_mon, target_ws));
+                    out.dirty_monitors.push(target_mon);
                 }
             }
             Event::Quit => out.quit = true,
