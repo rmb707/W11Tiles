@@ -62,7 +62,7 @@ pub fn title_of(hwnd: HWND) -> String {
     }
 }
 
-fn is_cloaked(hwnd: HWND) -> bool {
+pub fn is_cloaked(hwnd: HWND) -> bool {
     let mut cloaked: u32 = 0;
     unsafe {
         DwmGetWindowAttribute(

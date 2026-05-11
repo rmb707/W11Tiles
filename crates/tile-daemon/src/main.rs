@@ -335,7 +335,7 @@ async fn run() -> Result<()> {
                     let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
                     (pt.x, pt.y)
                 };
-                let zones = build_hot_drop_zones(&state, cx, cy, src);
+                let zones = build_hot_drop_zones(&state, &map, cx, cy, src);
                 drop_zones.show(zones);
             }
             _ = frame_tick.tick(), if animator.is_animating() => {
@@ -603,7 +603,7 @@ fn handle_hook_event(
             //   3. Anywhere else (blank, src's own cell)  → Float
             // The drop_zones overlay shows all five regions so the user
             // can aim deliberately.
-            let target = find_drop_target(state, cursor_x, cursor_y, src);
+            let target = find_drop_target(state, map, cursor_x, cursor_y, src);
             match target {
                 Some(DropTarget::Tile { window: target_id, kind: DropZoneKind::Center }) => {
                     info!(src=%src, target=%target_id, cursor=?(cursor_x, cursor_y), "drag-merge (tab)");
@@ -646,16 +646,18 @@ fn handle_hook_event(
 #[cfg(windows)]
 fn build_hot_drop_zones(
     state: &State,
+    map: &Arc<HwndMap>,
     cursor_x: i32,
     cursor_y: i32,
     src: tile_core::WindowId,
 ) -> Vec<DropZone> {
-    let target = find_drop_target(state, cursor_x, cursor_y, src);
+    let target = find_drop_target(state, map, cursor_x, cursor_y, src);
     let mut zones: Vec<DropZone> = Vec::new();
     for mon in &state.monitors {
         let plan = mon.active().compute(mon.work_area);
         for p in &plan.placements {
             if p.window == src { continue; }
+            if !is_placement_visible(map, p.window) { continue; }
             let hot = match target {
                 Some(DropTarget::Tile { window: id, kind }) if id == p.window => match kind {
                     DropZoneKind::Center                       => tile_win::drop_zones::HotZone::Center,
@@ -683,6 +685,29 @@ enum DropZoneKind {
 }
 
 /// Cell hit-test: which tile + which sub-zone of that tile contains the
+/// True if the underlying HWND for a placement is *currently visible*
+/// to the user — i.e., not iconic (minimized) and not DWM-cloaked
+/// (suspended UWP, mid-VD-transition, etc.). Used to filter the
+/// drop-zone overlay and cursor hit-test so we don't render targets
+/// for windows the user can't see on screen.
+///
+/// We keep the placement in the BSP tree either way — the window will
+/// snap right back into its cell when it un-minimizes or un-cloaks.
+/// We just don't *show* the drop affordance for it.
+#[cfg(windows)]
+fn is_placement_visible(map: &Arc<HwndMap>, window: tile_core::WindowId) -> bool {
+    let Some(hwnd) = map.lookup_hwnd(window) else { return false };
+    unsafe {
+        if windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd).as_bool() {
+            return false;
+        }
+    }
+    if manageable::is_cloaked(hwnd) {
+        return false;
+    }
+    true
+}
+
 /// Result of cursor hit-testing a drag-end against the current layout.
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy)]
@@ -704,6 +729,7 @@ enum DropTarget {
 #[cfg(windows)]
 fn find_drop_target(
     state: &State,
+    map: &Arc<HwndMap>,
     x: i32,
     y: i32,
     exclude: tile_core::WindowId,
@@ -714,6 +740,13 @@ fn find_drop_target(
         let plan = mon.active().compute(mon.work_area);
         for p in &plan.placements {
             if p.window == exclude { continue; }
+            // Skip placements whose underlying window is currently
+            // invisible to the user (minimized to taskbar, or cloaked
+            // by DWM e.g. suspended UWP). The window still has a slot
+            // in the BSP tree — we'll restore it cleanly when it
+            // un-minimizes — but rendering a hit-target for a tile
+            // the user can't actually see makes drop zones lie.
+            if !is_placement_visible(map, p.window) { continue; }
             if !p.rect.contains_point(x, y) { continue; }
             // Same 3×3 division as drop_zones renders: left column =
             // LEFT, right column = RIGHT, top/bottom rows of the middle
