@@ -112,7 +112,20 @@ pub fn is_manageable(hwnd: HWND) -> bool {
         // Tool windows: float by default (they tend to be palettes/toolbars).
         if ex & WS_EX_TOOLWINDOW.0 != 0 && ex & WS_EX_APPWINDOW.0 == 0 { return false; }
 
-        if is_cloaked(hwnd) { return false; }
+        // Cloaked-check INTENTIONALLY REMOVED. DWM cloaks every window on
+        // a non-current virtual desktop, so if we filtered by cloaked
+        // here we'd never see windows on other VDs at all — the daemon
+        // would only know about the desktop the user happens to be on
+        // when it started. That gave a "tiling only works after I
+        // visit each desktop" UX. By accepting cloaked windows, we
+        // enumerate every top-level window on every VD at startup and
+        // route each into the right workspace via GetWindowDesktopId.
+        // The applier separately skips not-on-current-VD windows via
+        // IsWindowOnCurrentVirtualDesktop, so we don't try to
+        // SetWindowPos cloaked windows until they uncloak naturally.
+        // Suspended UWP windows that pass this check are filtered by
+        // the class skiplist below (ApplicationFrameWindow, etc.).
+        let _ = is_cloaked; // kept for callers that want the check explicitly
 
         let class = class_of(hwnd);
         if SKIP_CLASSES.iter().any(|c| *c == class) { return false; }
