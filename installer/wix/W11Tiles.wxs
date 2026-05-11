@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  W11 Tiles — Windows Installer source.
+
+  This is a per-user MSI: it installs into %LocalAppData%\W11Tiles\ without
+  requiring elevation. The user gets a Start Menu shortcut and, by default,
+  an auto-start Startup shortcut so the daemon comes up at logon.
+
+  Built with WiX Toolset v7. To rebuild manually:
+      wix build installer\wix\W11Tiles.wxs ^
+          -arch x64 ^
+          -ext WixToolset.UI.wixext ^
+          -d Version=0.1.0 ^
+          -d DaemonExe=target\x86_64-pc-windows-gnu\release\tile-daemon.exe ^
+          -d TilectlExe=target\x86_64-pc-windows-gnu\release\tilectl.exe ^
+          -d LicensePath=installer\wix\License.rtf ^
+          -o target\wix\W11Tiles-0.1.0-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+      Name="W11 Tiles"
+      Manufacturer="rmb707"
+      Version="$(var.Version)"
+      UpgradeCode="9C7F31D6-5E3B-4A2A-9F6B-2E54B3A1F101"
+      Scope="perUser"
+      Compressed="yes"
+      InstallerVersion="500">
+
+    <!-- Upgrade behavior: replace older installs in-place, never downgrade. -->
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of W11 Tiles is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Icon used in Add/Remove Programs. -->
+    <Icon Id="W11TilesIcon" SourceFile="$(var.DaemonExe)" />
+    <Property Id="ARPPRODUCTICON" Value="W11TilesIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/rmb707/W11Tiles" />
+    <Property Id="ARPHELPLINK"     Value="https://github.com/rmb707/W11Tiles" />
+
+    <!--
+      Install layout under %LocalAppData%\W11Tiles\.
+      LocalAppDataFolder is per-user, so the install needs no admin token.
+    -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="W11Tiles" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="W11 Tiles" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="StartupFolder" />
+
+    <!-- Daemon binary + Start Menu + uninstall-cleanup of install dir. -->
+    <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
+      <Component Id="cmpDaemon" Guid="*">
+        <File Id="filDaemon" Source="$(var.DaemonExe)" KeyPath="yes" Name="tile-daemon.exe" />
+      </Component>
+
+      <Component Id="cmpTilectl" Guid="*">
+        <File Id="filTilectl" Source="$(var.TilectlExe)" KeyPath="yes" Name="tilectl.exe" />
+      </Component>
+
+      <Component Id="cmpRemoveInstallFolder" Guid="*">
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\rmb707\W11Tiles"
+            Name="InstallFolder"
+            Type="string"
+            Value="[INSTALLFOLDER]"
+            KeyPath="yes" />
+        <RemoveFolder Id="rmINSTALLFOLDER" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="StartMenuComponents" Directory="ApplicationProgramsFolder">
+      <Component Id="cmpStartMenuShortcut" Guid="*">
+        <Shortcut
+            Id="StartMenuShortcut"
+            Name="W11 Tiles"
+            Description="Native Windows 11 tiling window manager"
+            Target="[INSTALLFOLDER]tile-daemon.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="rmApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\rmb707\W11Tiles"
+            Name="StartMenuShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      Auto-start at logon. Disabled by deselecting the AutoStart feature in
+      the installer's feature tree. Anchored via the Startup folder rather
+      than HKCU\...\Run because the Startup folder is what most Windows
+      users know how to inspect and remove.
+    -->
+    <ComponentGroup Id="AutoStartComponents" Directory="StartupFolder">
+      <Component Id="cmpStartupShortcut" Guid="*">
+        <Shortcut
+            Id="StartupShortcut"
+            Name="W11 Tiles"
+            Description="W11 Tiles — start at logon"
+            Target="[INSTALLFOLDER]tile-daemon.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\rmb707\W11Tiles"
+            Name="AutoStart"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="MainFeature"
+             Title="W11 Tiles"
+             Description="Core daemon, tilectl CLI, and Start Menu shortcut."
+             Level="1"
+             AllowAbsent="no">
+      <ComponentGroupRef Id="MainComponents" />
+      <ComponentGroupRef Id="StartMenuComponents" />
+    </Feature>
+
+    <Feature Id="AutoStartFeature"
+             Title="Launch at logon"
+             Description="Adds a Startup shortcut so W11 Tiles runs at sign-in."
+             Level="1">
+      <ComponentGroupRef Id="AutoStartComponents" />
+    </Feature>
+
+    <!--
+      Wizard UI. WixUI_FeatureTree lets the user opt out of the auto-start
+      feature without going through a full custom dialog set.
+    -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicensePath)" />
+
+  </Package>
+</Wix>

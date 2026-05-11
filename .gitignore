@@ -7,4 +7,8 @@
 *.exe
 *.dll
 *.log
+*.msi
+*.wixpdb
+*.pfx
+release-notes-v*.md
 

@@ -46,6 +46,18 @@ Plus mouse:
 - **Drop on blank** for a *non*-tabbed window = float. For a tab member = snap back to the group (tab popouts must be deliberate via the `WIN+ALT+U` keybind or the close X).
 - **Click a tab** on the strip to switch active. **Click the X** on a tab to close that window.
 
+## Install
+
+The [latest release](https://github.com/rmb707/W11Tiles/releases/latest) ships three artifacts:
+
+- **`W11Tiles-<version>-x64.msi`** — per-user installer. No admin prompt. Installs to `%LocalAppData%\W11Tiles\`, adds a Start Menu shortcut, and (optional) a Startup-folder shortcut for auto-launch at logon. Uninstall through the normal Windows Settings → Apps screen.
+- **`tile-daemon.exe`** — the daemon, if you want to wire it up by hand.
+- **`tilectl.exe`** — the CLI client.
+
+The binaries and MSI are currently **unsigned**, so SmartScreen will show a "Windows protected your PC" dialog on first launch — click *More info* → *Run anyway*. Signing is on the roadmap.
+
+To produce the MSI yourself after building from source, see `installer/build-msi.ps1`. The schema lives at `installer/wix/W11Tiles.wxs`; the Win-SDK `signtool` integration is in `installer/sign.ps1`.
+
 ## Build
 
 You need **Rust ≥ 1.78** with the `x86_64-pc-windows-gnu` target. Why GNU and not MSVC? See *Architecture* below — short version, this stack avoids Visual Studio Build Tools entirely without giving anything up.
@@ -126,8 +138,7 @@ Pre-alpha. The full happy path works — layout, tabs, drag-to-merge, drag-to-ed
 - **`tilectl reload`** is a stub. Drop a new `config.toml` and restart for now.
 - **Tray icon** uses the generic `IDI_APPLICATION` icon. Custom `.ico` is a one-line swap; not done yet.
 - **Tray icon** doesn't handle `TaskbarCreated` re-add — if Explorer crashes and restarts, the icon disappears until daemon restart. Tracked.
-- **No installer.** `cargo-wix` MSI + Task Scheduler logon-trigger is the planned path; nothing committed yet.
-- **No code signing** for v1; SmartScreen will warn on first run.
+- **No code signing.** SmartScreen warns on first run. The MSI ships unsigned; `installer/sign.ps1` is wired up so signing is one command once a real cert is in hand.
 - **Fullscreen apps** are skipped by the applier while in fullscreen and re-tile when they exit. Won't catch DXGI-exclusive-fullscreen games that don't resize their HWND (rare).
 - **Multi-monitor mixed DPI** works but hasn't been tested with three monitors at three different scales. Bug reports welcome.
 
