@@ -81,9 +81,10 @@ const TRAY_ICON_UID: u32 = 1;
 /// Menu command IDs. `LOWORD(wparam)` of `WM_COMMAND` carries the picked
 /// item's ID, which we map back to a [`TrayCommand`] in the WndProc. The
 /// numeric values are private to this module — the daemon never sees them.
-const CMD_RELOAD: u32 = 1001;
-const CMD_ABOUT: u32 = 1002;
-const CMD_QUIT: u32 = 1003;
+const CMD_RELOAD:    u32 = 1001;
+const CMD_ABOUT:     u32 = 1002;
+const CMD_QUIT:      u32 = 1003;
+const CMD_SHORTCUTS: u32 = 1004;
 
 /// Class name registered with `RegisterClassExW`. UTF-16, NUL-terminated,
 /// matches the byte-literal style used by `tab_strip.rs` / `drop_zones.rs`
@@ -108,6 +109,9 @@ const TOOLTIP: &str = "TileManager";
 pub enum TrayCommand {
     ReloadConfig,
     About,
+    /// Show the keyboard-shortcuts dialog. Daemon spawns a worker
+    /// thread that pops a Win32 MessageBox listing every binding.
+    Shortcuts,
     Quit,
 }
 
@@ -387,9 +391,10 @@ unsafe fn show_context_menu(hwnd: HWND) {
         }
     };
 
-    append_menu_str(menu, CMD_RELOAD, "Reload Config");
-    append_menu_str(menu, CMD_ABOUT, "About");
-    append_menu_str(menu, CMD_QUIT, "Quit");
+    append_menu_str(menu, CMD_SHORTCUTS, "Keyboard Shortcuts…");
+    append_menu_str(menu, CMD_RELOAD,    "Reload Config");
+    append_menu_str(menu, CMD_ABOUT,     "About");
+    append_menu_str(menu, CMD_QUIT,      "Quit");
 
     // SetForegroundWindow on our hidden window before TrackPopupMenu is
     // required by the Win32 docs; without it the menu can be left
@@ -438,9 +443,10 @@ unsafe fn append_menu_str(menu: HMENU, id: u32, text: &str) {
 /// the WndProc handles channel send separately.
 fn command_from_id(id: u32) -> Option<TrayCommand> {
     match id {
-        CMD_RELOAD => Some(TrayCommand::ReloadConfig),
-        CMD_ABOUT => Some(TrayCommand::About),
-        CMD_QUIT => Some(TrayCommand::Quit),
+        CMD_RELOAD    => Some(TrayCommand::ReloadConfig),
+        CMD_ABOUT     => Some(TrayCommand::About),
+        CMD_SHORTCUTS => Some(TrayCommand::Shortcuts),
+        CMD_QUIT      => Some(TrayCommand::Quit),
         _ => None,
     }
 }

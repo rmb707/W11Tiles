@@ -21,6 +21,7 @@ pub mod drop_zones;
 pub mod tray;
 pub mod dwm_polish;
 pub mod icon;
+pub mod shortcuts_dialog;
 
 #[cfg(windows)]
 pub use hook::EventHook;

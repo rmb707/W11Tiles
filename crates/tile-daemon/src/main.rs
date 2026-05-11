@@ -311,7 +311,16 @@ async fn run() -> Result<()> {
                         // their click registered.
                     }
                     TrayCommand::About => {
-                        info!("tray: about (TileManager v{})", env!("CARGO_PKG_VERSION"));
+                        info!("tray: about (W11 Tiles v{})", env!("CARGO_PKG_VERSION"));
+                    }
+                    TrayCommand::Shortcuts => {
+                        info!("tray: show keyboard shortcuts");
+                        // MessageBoxW blocks the calling thread until the
+                        // user dismisses it — spawn a regular OS thread
+                        // so the daemon's tokio runtime keeps pumping.
+                        std::thread::spawn(|| {
+                            tile_win::shortcuts_dialog::show();
+                        });
                     }
                     TrayCommand::Quit => {
                         info!("tray: quit requested");
