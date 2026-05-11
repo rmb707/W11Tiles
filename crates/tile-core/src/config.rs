@@ -37,7 +37,7 @@ pub struct Gaps {
     pub outer: i32,
     pub inner: i32,
 }
-impl Default for Gaps { fn default() -> Self { Self { outer: 12, inner: 8 } } }
+impl Default for Gaps { fn default() -> Self { Self { outer: 0, inner: 0 } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

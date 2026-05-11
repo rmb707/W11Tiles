@@ -142,7 +142,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { outer_gap: 12, inner_gap: 8, workspaces_per_monitor: 9, resize_step: 0.05 }
+        // Zero gaps default — edge-to-edge tiling. Users who want
+        // visible gaps between tiles can set non-zero values in
+        // `%APPDATA%\TileManager\config.toml`.
+        Self { outer_gap: 0, inner_gap: 0, workspaces_per_monitor: 9, resize_step: 0.05 }
     }
 }
 

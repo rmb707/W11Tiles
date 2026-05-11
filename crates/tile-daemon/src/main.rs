@@ -228,6 +228,17 @@ async fn run() -> Result<()> {
     // poll the rest of the time.
     let mut cursor_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     cursor_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // 500ms reconcile tick. Runs when nothing is animating to catch
+    // windows that drifted out of their tile cell without firing any
+    // event we'd normally hook — the common case is a user exiting
+    // fullscreen with Esc/F11: the app changes its rect via internal
+    // SetWindowPos, we don't see a hook event, and the window stays at
+    // its old fullscreen-restore position until something forces a
+    // repaint. This reconcile makes the snap-back happen within 500ms
+    // of the exit. Cheap (Win32 SetWindowPos to current rect is a no-op).
+    let mut reconcile_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dragging_src: Option<tile_core::WindowId> = None;
 
     loop {
@@ -244,7 +255,7 @@ async fn run() -> Result<()> {
                 }
                 let vd_changed = handle_hook_event(
                     &mut state, &applier, &mut vd_map, &mut current_ws, &drop_zones,
-                    &mut animator, ev,
+                    &mut animator, &map, ev,
                 );
                 if vd_changed {
                     // After a VD switch, the windows on the new desktop just
@@ -257,13 +268,13 @@ async fn run() -> Result<()> {
             act = action_rx.recv() => {
                 let Some(act) = act else { break };
                 if let Some(ev) = action_to_event(act) {
-                    handle_event(&mut state, &applier, &mut animator, ev);
+                    handle_event(&mut state, &applier, &mut animator, &map, ev);
                     refresh_tab_strips(&state, &tab_strips);
                 }
             }
             req = ipc_rx.recv() => {
                 let Some((req, reply)) = req else { break };
-                let resp = handle_ipc(&mut state, &applier, &mut animator, req);
+                let resp = handle_ipc(&mut state, &applier, &mut animator, &map, req);
                 let _ = reply.send(resp);
                 refresh_tab_strips(&state, &tab_strips);
             }
@@ -271,7 +282,7 @@ async fn run() -> Result<()> {
                 let Some(action) = click else { break };
                 match action {
                     TabAction::Activate(window) => {
-                        handle_event(&mut state, &applier, &mut animator, CoreEvent::ActivateTab { window });
+                        handle_event(&mut state, &applier, &mut animator, &map, CoreEvent::ActivateTab { window });
                         // Bring the now-active tab to the foreground so keyboard input
                         // routes to it.
                         applier.focus(window);
@@ -285,7 +296,7 @@ async fn run() -> Result<()> {
             _ = discover_tick.tick() => {
                 // Two diffs on the same cadence: catches added/removed
                 // monitors AND windows we missed via the WinEventHook.
-                discover_monitors(&mut state, &applier, &mut animator);
+                discover_monitors(&mut state, &applier, &mut animator, &map);
                 discover_windows(&mut state, &applier, &mut vd_map, current_ws, &map, &mut animator);
                 refresh_tab_strips(&state, &tab_strips);
             }
@@ -327,6 +338,17 @@ async fn run() -> Result<()> {
                     let _ = applier.apply(&frame);
                 }
             }
+            _ = reconcile_tick.tick(), if !animator.is_animating() => {
+                // Snap-back any window that drifted out of its tile cell
+                // since our last apply. Primary case: user exited
+                // fullscreen with Esc/F11 — the app restored its own
+                // rect, no event fired we could hook, and the window
+                // sits at its pre-fullscreen position. Calling
+                // applier.apply with the current plan re-snaps it.
+                // No-op for windows already at the right rect (Win32
+                // SetWindowPos to the same coords is essentially free).
+                let _ = applier.apply(&combined_plan(&state, &map));
+            }
             _ = &mut shutdown => {
                 info!("shutdown signal received");
                 break;
@@ -349,12 +371,26 @@ async fn run() -> Result<()> {
 /// plan is omitted, the animator would think every monitor-2 window
 /// closed and snap them away.
 #[cfg(windows)]
-fn combined_plan(state: &State) -> tile_core::LayoutPlan {
+fn combined_plan(state: &State, map: &Arc<HwndMap>) -> tile_core::LayoutPlan {
     let mut plan = tile_core::LayoutPlan::default();
     for mon in &state.monitors {
-        if let Some(p) = state.plan_for(mon.id) {
-            plan.placements.extend(p.placements);
+        let Some(p) = state.plan_for(mon.id) else { continue };
+        // Solo-fullscreen gate. If this monitor has exactly one placement
+        // AND the underlying HWND is currently fullscreen (game, video,
+        // slideshow), leave it alone — applying our cell rect would
+        // shrink it to work_area-minus-gaps and break the user's
+        // intentional fullscreen state. As soon as a second window joins
+        // the monitor, both ends up in the plan and the fullscreen
+        // window gets SetWindowPos'd into its tile cell, exiting
+        // fullscreen automatically.
+        if p.placements.len() == 1 {
+            if let Some(hwnd) = map.lookup_hwnd(p.placements[0].window) {
+                if manageable::is_fullscreen(hwnd) {
+                    continue;
+                }
+            }
         }
+        plan.placements.extend(p.placements);
     }
     plan
 }
@@ -422,7 +458,7 @@ fn discover_windows(
             title = %title, "discovered window"
         );
         let info = tile_core::WindowInfo::new(id, title, class);
-        handle_event(state, applier, animator, CoreEvent::WindowOpened { info, monitor, workspace });
+        handle_event(state, applier, animator, map, CoreEvent::WindowOpened { info, monitor, workspace });
     }
 }
 
@@ -440,6 +476,7 @@ fn discover_monitors(
     state: &mut State,
     applier: &Applier,
     animator: &mut tile_core::animator::Animator,
+    map: &Arc<HwndMap>,
 ) {
     let cfg = state.config.clone();
     let fresh = monitors::enumerate(cfg.outer_gap, cfg.inner_gap, cfg.workspaces_per_monitor);
@@ -460,7 +497,7 @@ fn discover_monitors(
                     id = %new_mon.id, bounds = ?new_mon.bounds, dpi = new_mon.dpi,
                     "monitor reshape detected"
                 );
-                handle_event(state, applier, animator, CoreEvent::MonitorReshaped {
+                handle_event(state, applier, animator, map, CoreEvent::MonitorReshaped {
                     id: new_mon.id,
                     bounds: new_mon.bounds,
                     work_area: new_mon.work_area,
@@ -469,7 +506,7 @@ fn discover_monitors(
             }
         } else {
             info!(id = %new_mon.id, "new monitor attached");
-            handle_event(state, applier, animator, CoreEvent::MonitorAttached {
+            handle_event(state, applier, animator, map, CoreEvent::MonitorAttached {
                 monitor: new_mon.clone(),
             });
         }
@@ -478,7 +515,7 @@ fn discover_monitors(
     // Anything still in `existing_ids` was unplugged.
     for gone in existing_ids {
         info!(id = %gone, "monitor detached");
-        handle_event(state, applier, animator, CoreEvent::MonitorDetached { id: gone });
+        handle_event(state, applier, animator, map, CoreEvent::MonitorDetached { id: gone });
     }
 }
 
@@ -494,6 +531,7 @@ fn handle_hook_event(
     current_ws: &mut WorkspaceId,
     drop_zones: &DropZoneManager,
     animator: &mut tile_core::animator::Animator,
+    map: &Arc<HwndMap>,
     ev: HookEvent,
 ) -> bool {
     let mut vd_changed = false;
@@ -505,12 +543,12 @@ fn handle_hook_event(
             // of the previous hardcoded MonitorId(1) — without this every
             // window crowded the primary on multi-monitor rigs.
             let monitor = monitors::monitor_id_for_window(hwnd);
-            handle_event(state, applier, animator,CoreEvent::WindowOpened {
+            handle_event(state, applier, animator, map,CoreEvent::WindowOpened {
                 info, monitor, workspace,
             });
         }
         HookEvent::Closed { id } => {
-            handle_event(state, applier, animator,CoreEvent::WindowClosed { id });
+            handle_event(state, applier, animator, map,CoreEvent::WindowClosed { id });
         }
         HookEvent::Focused { raw_hwnd, id } => {
             // Detect a VD switch on focus change. If the foreground window's
@@ -523,15 +561,15 @@ fn handle_hook_event(
                 *current_ws = ws;
                 vd_changed = true;
                 // Tell the state machine to flip to the new workspace.
-                handle_event(state, applier, animator,CoreEvent::SwitchWorkspace { id: ws });
+                handle_event(state, applier, animator, map,CoreEvent::SwitchWorkspace { id: ws });
             }
-            handle_event(state, applier, animator,CoreEvent::WindowFocused { id });
+            handle_event(state, applier, animator, map,CoreEvent::WindowFocused { id });
         }
         HookEvent::Floated { id } => {
-            handle_event(state, applier, animator,CoreEvent::WindowFloated { id });
+            handle_event(state, applier, animator, map,CoreEvent::WindowFloated { id });
         }
         HookEvent::Restored { raw_hwnd: _, id } => {
-            handle_event(state, applier, animator,CoreEvent::WindowFocused { id });
+            handle_event(state, applier, animator, map,CoreEvent::WindowFocused { id });
         }
         HookEvent::DragStarted { src } => {
             // Compute drop-zones for every visible tile except `src`.
@@ -561,11 +599,11 @@ fn handle_hook_event(
             match target {
                 Some((target_id, DropZoneKind::Center)) => {
                     info!(src=%src, target=%target_id, cursor=?(cursor_x, cursor_y), "drag-merge (tab)");
-                    handle_event(state, applier, animator,CoreEvent::MergeWindows { src, target: target_id });
+                    handle_event(state, applier, animator, map,CoreEvent::MergeWindows { src, target: target_id });
                 }
                 Some((target_id, DropZoneKind::Edge(edge))) => {
                     info!(src=%src, target=%target_id, ?edge, "drag-tile (split)");
-                    handle_event(state, applier, animator,CoreEvent::DropAtEdge { src, target: target_id, edge });
+                    handle_event(state, applier, animator, map,CoreEvent::DropAtEdge { src, target: target_id, edge });
                 }
                 None => {
                     // Tab-group members are sticky: a stray drag-release on
@@ -575,10 +613,10 @@ fn handle_hook_event(
                     // is in a tab group, snap it back; otherwise float.
                     if state.is_in_tab_group(src) {
                         info!(src=%src, "drag ended on blank — snap back to tab group");
-                        animator.set_target(combined_plan(state), std::time::Instant::now());
+                        animator.set_target(combined_plan(state, map), std::time::Instant::now());
                     } else {
                         info!(src=%src, cursor=?(cursor_x, cursor_y), "drag ended on blank/self — floating");
-                        handle_event(state, applier, animator,CoreEvent::WindowFloated { id: src });
+                        handle_event(state, applier, animator, map,CoreEvent::WindowFloated { id: src });
                     }
                 }
             }
@@ -672,6 +710,7 @@ fn handle_event(
     state: &mut State,
     applier: &Applier,
     animator: &mut tile_core::animator::Animator,
+    map: &Arc<HwndMap>,
     ev: CoreEvent,
 ) {
     // Only PROACTIVE focus changes should re-call SetForegroundWindow.
@@ -689,7 +728,7 @@ fn handle_event(
             // animator owns the in-flight tween; the 60Hz tokio tick
             // consumes its frames and pushes them through the applier.
             if !out.dirty_monitors.is_empty() {
-                animator.set_target(combined_plan(state), std::time::Instant::now());
+                animator.set_target(combined_plan(state, map), std::time::Instant::now());
             }
             if proactive_focus {
                 if let Some(focused) = state.focused_monitor
@@ -705,7 +744,7 @@ fn handle_event(
 }
 
 #[cfg(windows)]
-fn handle_ipc(state: &mut State, applier: &Applier, animator: &mut tile_core::animator::Animator, req: Request) -> Response {
+fn handle_ipc(state: &mut State, applier: &Applier, animator: &mut tile_core::animator::Animator, map: &Arc<HwndMap>, req: Request) -> Response {
     let ev = match req {
         Request::Ping => return Response::Pong { version: env!("CARGO_PKG_VERSION").into() },
         Request::ReloadConfig => {
@@ -727,7 +766,7 @@ fn handle_ipc(state: &mut State, applier: &Applier, animator: &mut tile_core::an
         Request::ActivateTab { window }   => CoreEvent::ActivateTab { window },
         Request::Quit                     => CoreEvent::Quit,
     };
-    handle_event(state, applier, animator,ev);
+    handle_event(state, applier, animator, map,ev);
     Response::Ok
 }
 

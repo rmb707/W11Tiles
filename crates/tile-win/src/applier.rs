@@ -61,17 +61,13 @@ impl Applier {
             for p in &plan.placements {
                 let Some(hwnd) = self.map.lookup_hwnd(p.window) else { continue };
                 if IsIconic(hwnd).as_bool() { continue; }
-                // A window in fullscreen (game, video player, slideshow) is
-                // already covering its monitor by the user's explicit choice.
-                // Re-issuing SetWindowPos against it either yanks it out of
-                // exclusive fullscreen (D3D apps lose their swap-chain) or
-                // visibly flickers the borderless variant. Leave it alone;
-                // its tile slot is reserved in the BSP tree, so the next
-                // applier pass after it exits fullscreen will reposition it.
-                if crate::manageable::is_fullscreen(hwnd) {
-                    debug!(window=%p.window, "skipping: window is fullscreen — leaving it alone until it exits");
-                    continue;
-                }
+                // Fullscreen filtering is no longer applier-side. The
+                // daemon's `combined_plan` already excludes the *only-
+                // window-on-monitor* fullscreen case from the placements
+                // list; any placement reaching the applier is meant to
+                // be SetWindowPos'd, including fullscreen ones (which
+                // will visibly exit fullscreen as a result — that's the
+                // intent when there are multiple windows on the monitor).
                 // Don't fight the OS while it's animating a virtual-desktop
                 // switch. Repositioning a window that just left the current
                 // desktop interrupts the transition and feels like the
