@@ -1,0 +1,24 @@
+[package]
+name        = "tile-win"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+description = "Win32 integration for TileManager: window enumeration, WinEventHook, SetWindowPos applier, RegisterHotKey, virtual desktop COM."
+
+[dependencies]
+tile-core    = { workspace = true }
+windows      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+parking_lot  = { workspace = true }
+tokio        = { workspace = true }
+
+[lib]
+crate-type = ["rlib"]
+
+[target.'cfg(windows)'.dependencies]
+# placeholder — keep windows feature-flag scoping centralized in workspace deps
