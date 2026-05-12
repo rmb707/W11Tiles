@@ -173,6 +173,29 @@ unsafe extern "system" fn callback(
     let mapped = match event {
         EVENT_OBJECT_CREATE | EVENT_OBJECT_SHOW => {
             if !is_manageable(hwnd) { return; }
+            // Killer heuristic for confirmation dialogs: if this window's
+            // owner is already a tracked window, it's a transient dialog
+            // of that window — "Save changes?", "Discard?", login prompts,
+            // EULA pages, options sub-windows. is_manageable already
+            // catches the WS_EX_APPWINDOW-less cases; this catches dialogs
+            // that incorrectly mark themselves WS_EX_APPWINDOW (some games,
+            // some Electron apps), which otherwise slip through.
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_OWNER};
+                if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
+                    if !owner.is_invalid() {
+                        let owner_raw = owner.0 as isize;
+                        if ctx.map.peek(owner_raw).is_some() {
+                            tracing::debug!(
+                                class = %class_of(hwnd),
+                                title = %title_of(hwnd),
+                                "skipping owned-by-tracked: looks like a dialog"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
             let id = ctx.map.intern(hwnd);
             let info = WindowInfo::new(id, title_of(hwnd), class_of(hwnd));
             Some(HookEvent::Opened { raw_hwnd, id, info })

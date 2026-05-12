@@ -514,6 +514,8 @@ fn sweep_dead_windows(
     use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
     let mut dead: Vec<tile_core::WindowId> = Vec::new();
     let mut minimized: Vec<tile_core::WindowId> = Vec::new();
+    let mut went_fullscreen: Vec<tile_core::WindowId> = Vec::new();
+    let mut left_fullscreen: Vec<tile_core::WindowId> = Vec::new();
     for (id, raw) in map.snapshot() {
         if !state.windows.contains_key(&id) {
             // Tracked in the hwnd map but already removed from state —
@@ -534,6 +536,26 @@ fn sweep_dead_windows(
         if unsafe { IsIconic(hwnd).as_bool() } {
             let still_tiled = state.windows.get(&id).map(|w| !w.floating).unwrap_or(false);
             if still_tiled { minimized.push(id); }
+            continue;
+        }
+        // Games and video players that enter fullscreen mid-session must
+        // be floated immediately. If we keep them in the BSP the applier
+        // will keep yanking them back to their tile cell, fighting the
+        // game's own resize-to-monitor — visible flicker, dropped frames,
+        // and (with anti-cheat) occasionally a misclassified intrusion.
+        // Inverse: a previously-fullscreen window that's no longer
+        // fullscreen rejoins the layout.
+        let fs_now = manageable::is_fullscreen(hwnd);
+        let was_floating = state.windows.get(&id).map(|w| w.floating).unwrap_or(false);
+        if fs_now && !was_floating {
+            went_fullscreen.push(id);
+        } else if !fs_now && was_floating {
+            // Only restore if this window was floated *by us* due to
+            // fullscreen — heuristic: it was tracked, it's now not
+            // fullscreen, and its current rect is reasonable. The
+            // WindowRestored handler is idempotent on already-tiled
+            // windows so the worst case is a no-op.
+            left_fullscreen.push(id);
         }
     }
     for id in dead {
@@ -544,6 +566,14 @@ fn sweep_dead_windows(
     for id in minimized {
         tracing::debug!(%id, "sweep: iconic without MINIMIZESTART — floating");
         handle_event(state, applier, animator, map, CoreEvent::WindowFloated { id });
+    }
+    for id in went_fullscreen {
+        tracing::debug!(%id, "sweep: window entered fullscreen — floating");
+        handle_event(state, applier, animator, map, CoreEvent::WindowFloated { id });
+    }
+    for id in left_fullscreen {
+        tracing::debug!(%id, "sweep: window left fullscreen — re-tiling");
+        handle_event(state, applier, animator, map, CoreEvent::WindowRestored { id });
     }
 }
 
