@@ -51,14 +51,34 @@ pub struct Monitor {
 }
 
 impl Monitor {
+    /// Returns the active workspace, self-healing if the invariant
+    /// (`active_workspace` ∈ `workspaces`) ever drifts. The invariant
+    /// can break when a monitor is detached and focus shifts to a
+    /// neighbour whose `active_workspace` was assigned (e.g. by
+    /// `SwitchWorkspace` reflecting a Windows VD index) before any
+    /// workspace was ever created on that monitor. Used to crash with
+    /// `STATUS_STACK_BUFFER_OVERRUN` mid-detach, which killed the daemon
+    /// and left Explorer's IVirtualDesktopManager in a half-released
+    /// state.
     pub fn active(&self) -> &Workspace {
-        self.workspaces.iter().find(|w| w.id == self.active_workspace)
-            .expect("active_workspace always points at an existing workspace")
+        if let Some(ws) = self.workspaces.iter().find(|w| w.id == self.active_workspace) {
+            ws
+        } else {
+            self.workspaces.first()
+                .expect("Monitor with zero workspaces — MonitorAttached must seed at least one")
+        }
     }
     pub fn active_mut(&mut self) -> &mut Workspace {
         let id = self.active_workspace;
-        self.workspaces.iter_mut().find(|w| w.id == id)
-            .expect("active_workspace always points at an existing workspace")
+        if self.workspaces.iter().any(|w| w.id == id) {
+            return self.workspaces.iter_mut().find(|w| w.id == id).unwrap();
+        }
+        // Self-heal: re-anchor to the first existing workspace rather than panic.
+        if let Some(first) = self.workspaces.first().map(|w| w.id) {
+            self.active_workspace = first;
+            return self.workspaces.iter_mut().find(|w| w.id == first).unwrap();
+        }
+        panic!("Monitor with zero workspaces — MonitorAttached must seed at least one");
     }
 
     /// Get a workspace by id, creating it (with the monitor's gap config) if it
@@ -218,17 +238,23 @@ impl State {
                 if self.focused_monitor == Some(id) {
                     self.focused_monitor = self.monitors.first().map(|m| m.id);
                 }
+                let outer_gap = self.config.outer_gap;
+                let inner_gap = self.config.inner_gap;
                 if let Some(home) = self.focused_monitor {
                     let landed_ws = if let Some(target) = self.monitor_mut(home) {
-                        let ws = target.active_workspace;
+                        let ws_id = target.active_workspace;
                         let work_area = target.work_area;
-                        let active = target.active_mut();
+                        // ensure_workspace, not active_mut: the new focused
+                        // monitor may have a stale active_workspace pointer
+                        // (set by SwitchWorkspace before any windows landed
+                        // there) and panicking here would abort the daemon.
+                        let active = target.ensure_workspace(ws_id, outer_gap, inner_gap);
                         for w in migrated.iter().copied() {
                             active.layout.insert(w, active.focused, work_area);
                             active.focused = Some(w);
                         }
                         out.dirty_monitors.push(home);
-                        Some(ws)
+                        Some(ws_id)
                     } else { None };
                     if let Some(ws) = landed_ws {
                         for w in migrated {
@@ -771,6 +797,51 @@ mod tests {
     /// `WindowOpened` for an already-known window must NOT create a
     /// duplicate leaf in the BSP tree. Discover-tick races with the hook's
     /// EVENT_OBJECT_SHOW, and apps that briefly cloak/uncloak across VD
+    /// MonitorDetached on a multi-monitor setup used to crash the daemon
+    /// with STATUS_STACK_BUFFER_OVERRUN when focus shifted to a monitor
+    /// whose `active_workspace` had never been allocated as an actual
+    /// Workspace (e.g. assigned by an earlier SwitchWorkspace reflecting
+    /// the user's Windows VD index). `active_mut().expect(...)` panicked,
+    /// `panic = "abort"` killed the process, and Explorer wedged because
+    /// the daemon never released its IVirtualDesktopManager proxies.
+    #[test]
+    fn detaching_focused_monitor_does_not_panic_on_stale_workspace() {
+        let mut s = State::new(Config::default());
+        let m1 = Monitor {
+            id: MonitorId(1),
+            bounds: Rect::new(0, 0, 1920, 1080),
+            work_area: Rect::new(0, 0, 1920, 1080),
+            dpi: 96,
+            workspaces: vec![Workspace::new(WorkspaceId(1), 0, 0)],
+            active_workspace: WorkspaceId(1),
+        };
+        // Second monitor whose active_workspace points at a workspace we
+        // never created on this monitor (id 7 = some other Windows VD).
+        let m2 = Monitor {
+            id: MonitorId(2),
+            bounds: Rect::new(1920, 0, 1920, 1080),
+            work_area: Rect::new(1920, 0, 1920, 1080),
+            dpi: 96,
+            workspaces: vec![], // empty: simulates the "newly seeded, no apps yet" state
+            active_workspace: WorkspaceId(7),
+        };
+        s.apply(Event::MonitorAttached { monitor: m1 }).unwrap();
+        s.apply(Event::MonitorAttached { monitor: m2 }).unwrap();
+        // m1 is focused (first attached). Put a window there so detach
+        // exercises the migration path.
+        s.apply(Event::WindowOpened {
+            info: WindowInfo::new(WindowId(100), "x", "X"),
+            monitor: MonitorId(1),
+            workspace: WorkspaceId(1),
+        }).unwrap();
+        // Detach the focused monitor. Pre-fix this would panic in
+        // Monitor::active_mut() because m2's active_workspace (7) does
+        // not exist in m2.workspaces.
+        s.apply(Event::MonitorDetached { id: MonitorId(1) }).unwrap();
+        // The window must have migrated to m2 cleanly.
+        assert_eq!(s.locations.get(&WindowId(100)).map(|(m,_)| *m), Some(MonitorId(2)));
+    }
+
     /// transitions, can both deliver back-to-back open events for the
     /// same id. Earlier behavior double-inserted, corrupting the tree.
     #[test]

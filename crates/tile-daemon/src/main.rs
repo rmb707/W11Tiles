@@ -40,6 +40,7 @@ use windows::Win32::Foundation::HWND;
 
 fn main() -> Result<()> {
     init_logging();
+    install_panic_hook();
     #[cfg(windows)]
     {
         tile_win::dpi::declare_per_monitor_aware();
@@ -47,6 +48,41 @@ fn main() -> Result<()> {
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(run())
+}
+
+/// Write panics to `%LOCALAPPDATA%\TileManager\crash.log` before the
+/// `panic = "abort"` runtime kills the process. Without this we get a
+/// bare `STATUS_STACK_BUFFER_OVERRUN` in Event Viewer and zero context.
+/// The same message is also logged through `tracing`, which usually
+/// makes it to stderr if anyone's tail-ing the daemon.
+fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let msg: &str = payload.downcast_ref::<&'static str>().copied()
+            .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<non-string panic payload>");
+        let location = info.location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(target: "panic", %location, "PANIC: {msg}\n{backtrace}");
+
+        // Best-effort crash log next to the user's config.
+        let log_path = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .map(|p| p.join("TileManager").join("crash.log"));
+        if let Some(path) = log_path {
+            if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                use std::io::Write;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let _ = writeln!(f, "\n=== panic at unix={now} {location} ===\n{msg}\n{backtrace}");
+            }
+        }
+        prev(info);
+    }));
 }
 
 fn init_logging() {
