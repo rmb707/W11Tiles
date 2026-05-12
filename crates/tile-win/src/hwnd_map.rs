@@ -88,6 +88,22 @@ impl HwndMap {
             inner.fwd.remove(&raw);
         }
     }
+
+    /// Lookup-only: do *not* mint a new id. Used by hook arms that fire
+    /// after a window's manageability degrades (e.g. MINIMIZESTART —
+    /// the window is iconic by the time the event arrives, so calling
+    /// `intern` would race the manageability filter). Returns `None` if
+    /// we never tracked this HWND.
+    pub fn peek(&self, raw_hwnd: isize) -> Option<WindowId> {
+        self.inner.lock().fwd.get(&raw_hwnd).copied()
+    }
+
+    /// Snapshot of all tracked `(WindowId, raw_hwnd)` pairs. Used by the
+    /// dead-HWND sweep so we don't hold the map lock across Win32 calls.
+    pub fn snapshot(&self) -> Vec<(WindowId, isize)> {
+        let inner = self.inner.lock();
+        inner.rev.iter().map(|(id, raw)| (*id, *raw)).collect()
+    }
 }
 
 #[cfg(test)]
