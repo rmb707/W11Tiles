@@ -39,6 +39,12 @@ pub enum HookEvent {
     Closed   { id: WindowId },
     Focused  { raw_hwnd: isize, id: WindowId },
     Floated  { id: WindowId },
+    /// User minimized the window (clicked _ or pressed Win+Down).
+    /// The daemon treats this as a temporary float: drop from the BSP
+    /// so the cell collapses, then re-insert on `Restored`. Without
+    /// this, the minimized window's tile becomes a "ghost" — invisible
+    /// but reserved — and new windows can't claim the slot.
+    Minimized { id: WindowId },
     Restored { raw_hwnd: isize, id: WindowId },
     /// User finished dragging `src`. `cursor` is the screen position
     /// where they released the mouse. The daemon decides whether this is
@@ -58,8 +64,8 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVE
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetCursorPos, GetMessageW, PostThreadMessageW, TranslateMessage, MSG,
     EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MOVESIZEEND,
-    EVENT_SYSTEM_MOVESIZESTART,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+    EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
     OBJID_WINDOW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
 };
 
@@ -212,6 +218,14 @@ unsafe extern "system" fn callback(
                 (0, 0)
             };
             Some(HookEvent::DragEnded { src, cursor_x, cursor_y })
+        }
+        EVENT_SYSTEM_MINIMIZESTART => {
+            // Don't gate on is_manageable: by the time MINIMIZESTART
+            // fires the window is already iconic, which our manageability
+            // filter rejects. We just need to know the HWND was something
+            // we were tracking.
+            let raw = hwnd.0 as isize;
+            ctx.map.peek(raw).map(|id| HookEvent::Minimized { id })
         }
         EVENT_SYSTEM_MINIMIZEEND => {
             if !is_manageable(hwnd) { return; }

@@ -334,6 +334,13 @@ async fn run() -> Result<()> {
                 // Two diffs on the same cadence: catches added/removed
                 // monitors AND windows we missed via the WinEventHook.
                 discover_monitors(&mut state, &applier, &mut animator, &map);
+                // Sweep before discover: emit WindowClosed for any tracked
+                // window whose HWND no longer exists. Without this, apps
+                // that vanish without firing EVENT_OBJECT_DESTROY (Electron
+                // teardown races, some Steam launchers, GPU-driver-killed
+                // games) keep their tile cell reserved forever and the
+                // surrounding tiles can't reclaim the space.
+                sweep_dead_windows(&mut state, &applier, &mut animator, &map);
                 discover_windows(&mut state, &applier, &mut vd_map, current_ws, &map, &mut animator);
                 refresh_tab_strips(&state, &tab_strips);
             }
@@ -478,6 +485,68 @@ fn refresh_tab_strips(state: &State, mgr: &TabStripManager) {
 /// don't tile") and on a 2-second tick (catches any window whose
 /// `CREATE`/`SHOW` event we missed).
 #[cfg(windows)]
+/// Walk every window the daemon thinks exists and verify its HWND is
+/// still valid. Any window whose HWND has been recycled or destroyed
+/// without us seeing an `EVENT_OBJECT_DESTROY` gets a synthetic
+/// `WindowClosed`, which collapses its tile and lets siblings reclaim
+/// the freed cell.
+///
+/// Why this matters: WinEvent delivery isn't guaranteed. Apps that exit
+/// abnormally (Electron renderer crashes, GPU-driver-killed processes,
+/// some installer cleanups) frequently skip DESTROY. Without this
+/// sweep their tile cell stays reserved forever — the user reports it
+/// as a "ghost window" because they can't drop anything into the
+/// invisible-but-occupied slot.
+///
+/// Also catches windows that became minimized while we weren't looking
+/// (e.g. a hotkey from another tool, or `ShowWindow(SW_MINIMIZE)`
+/// triggered programmatically). Iconic windows that the daemon still
+/// has in its layout get a synthetic `WindowFloated` so the surrounding
+/// tiles collapse around them; the matching `EVENT_SYSTEM_MINIMIZEEND`
+/// will bring them back through `WindowRestored`.
+#[cfg(windows)]
+fn sweep_dead_windows(
+    state: &mut State,
+    applier: &Applier,
+    animator: &mut tile_core::animator::Animator,
+    map: &Arc<HwndMap>,
+) {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
+    let mut dead: Vec<tile_core::WindowId> = Vec::new();
+    let mut minimized: Vec<tile_core::WindowId> = Vec::new();
+    for (id, raw) in map.snapshot() {
+        if !state.windows.contains_key(&id) {
+            // Tracked in the hwnd map but already removed from state —
+            // forget the entry so we don't keep re-checking it forever.
+            map.forget_id(id);
+            continue;
+        }
+        let hwnd = HWND(raw as *mut _);
+        let is_window = unsafe { IsWindow(hwnd).as_bool() };
+        if !is_window {
+            dead.push(id);
+            continue;
+        }
+        // Window is still alive but iconic — collapse its tile if we
+        // still have it in the BSP. We check `floating` because that's
+        // the daemon's flag for "out of layout"; an already-floating
+        // minimized window is fine where it is.
+        if unsafe { IsIconic(hwnd).as_bool() } {
+            let still_tiled = state.windows.get(&id).map(|w| !w.floating).unwrap_or(false);
+            if still_tiled { minimized.push(id); }
+        }
+    }
+    for id in dead {
+        tracing::debug!(%id, "sweep: HWND no longer valid — closing");
+        map.forget_id(id);
+        handle_event(state, applier, animator, map, CoreEvent::WindowClosed { id });
+    }
+    for id in minimized {
+        tracing::debug!(%id, "sweep: iconic without MINIMIZESTART — floating");
+        handle_event(state, applier, animator, map, CoreEvent::WindowFloated { id });
+    }
+}
+
 fn discover_windows(
     state: &mut State,
     applier: &Applier,
@@ -613,8 +682,15 @@ fn handle_hook_event(
         HookEvent::Floated { id } => {
             handle_event(state, applier, animator, map,CoreEvent::WindowFloated { id });
         }
+        HookEvent::Minimized { id } => {
+            // Treat a minimize as a temporary float so the tile cell
+            // collapses immediately and surrounding windows reclaim the
+            // space. Restored re-inserts via WindowRestored.
+            handle_event(state, applier, animator, map, CoreEvent::WindowFloated { id });
+        }
         HookEvent::Restored { raw_hwnd: _, id } => {
-            handle_event(state, applier, animator, map,CoreEvent::WindowFocused { id });
+            handle_event(state, applier, animator, map, CoreEvent::WindowRestored { id });
+            handle_event(state, applier, animator, map, CoreEvent::WindowFocused { id });
         }
         HookEvent::DragStarted { src } => {
             // Compute drop-zones for every visible tile except `src`.

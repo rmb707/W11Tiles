@@ -113,6 +113,10 @@ pub enum Event {
     WindowFocused   { id: WindowId },
     /// User dragged the window outside its tile cell — fall back to floating.
     WindowFloated   { id: WindowId },
+    /// Window un-minimized (or otherwise came back from a floating-due-to-
+    /// minimize state). Re-inserts the window into its previous workspace's
+    /// BSP tree so it claims a real tile again. Symmetric with `WindowFloated`.
+    WindowRestored  { id: WindowId },
 
     // ---- user commands (from hotkeys or tilectl) ----
     FocusDirection  { dir: Direction },
@@ -336,6 +340,34 @@ impl State {
                     if let Some(mon) = self.monitor_mut(mon_id) {
                         if let Some(ws) = mon.workspaces.iter_mut().find(|w| w.id == ws_id) {
                             ws.layout.remove(id);
+                        }
+                        out.dirty_monitors.push(mon_id);
+                    }
+                }
+            }
+            Event::WindowRestored { id } => {
+                // Symmetric inverse of WindowFloated. If we don't already
+                // track the window we can't restore it — bail silently;
+                // the next WindowOpened (e.g. from the discover sweep)
+                // will pick it up.
+                let Some(info) = self.windows.get_mut(&id) else { return Ok(out); };
+                if !info.floating {
+                    // Already tiled. Nothing to do; the upcoming WindowFocused
+                    // from the daemon will move focus to it.
+                    return Ok(out);
+                }
+                info.floating = false;
+                if let Some((mon_id, ws_id)) = self.locations.get(&id).copied() {
+                    if let Some(mon) = self.monitor_mut(mon_id) {
+                        let work_area = mon.work_area;
+                        if let Some(ws) = mon.workspaces.iter_mut().find(|w| w.id == ws_id) {
+                            // Idempotency guard: if the window is somehow
+                            // still in the tree, don't insert a duplicate
+                            // leaf (would corrupt the BSP).
+                            if !ws.layout.windows().contains(&id) {
+                                ws.layout.insert(id, ws.focused, work_area);
+                            }
+                            ws.focused = Some(id);
                         }
                         out.dirty_monitors.push(mon_id);
                     }
@@ -797,6 +829,58 @@ mod tests {
     /// `WindowOpened` for an already-known window must NOT create a
     /// duplicate leaf in the BSP tree. Discover-tick races with the hook's
     /// EVENT_OBJECT_SHOW, and apps that briefly cloak/uncloak across VD
+    /// Floating then restoring a window must round-trip cleanly: tile
+    /// count back to original, focus on the restored window. Catches
+    /// regressions where WindowRestored either fails to re-insert,
+    /// inserts a duplicate leaf, or leaves the floating flag stuck on.
+    #[test]
+    fn floated_then_restored_round_trips_into_layout() {
+        let mut s = fresh();
+        for id in [1u64, 2, 3] {
+            s.apply(Event::WindowOpened {
+                info: WindowInfo::new(WindowId(id), "x", "X"),
+                monitor: MonitorId(1),
+                workspace: WorkspaceId(1),
+            }).unwrap();
+        }
+        let baseline = s.plan_for(MonitorId(1)).unwrap().placements.len();
+        assert_eq!(baseline, 3);
+        // Float window 2 (simulates minimize).
+        s.apply(Event::WindowFloated { id: WindowId(2) }).unwrap();
+        assert_eq!(s.plan_for(MonitorId(1)).unwrap().placements.len(), 2);
+        assert!(s.windows.get(&WindowId(2)).unwrap().floating);
+        // Restore. Window 2 must rejoin the BSP, no duplicate leaves.
+        s.apply(Event::WindowRestored { id: WindowId(2) }).unwrap();
+        assert!(!s.windows.get(&WindowId(2)).unwrap().floating);
+        assert_eq!(s.plan_for(MonitorId(1)).unwrap().placements.len(), 3);
+        let mon = s.monitor(MonitorId(1)).unwrap();
+        let leaves = mon.active().windows();
+        let win2_count = leaves.iter().filter(|w| **w == WindowId(2)).count();
+        assert_eq!(win2_count, 1, "BSP must contain exactly one leaf for the restored window");
+        assert_eq!(mon.active().focused, Some(WindowId(2)));
+    }
+
+    /// WindowRestored on a window that's *already* tiled (no float in
+    /// flight) must be an idempotent no-op — calling it must not
+    /// duplicate the leaf or panic. This is the path the daemon takes
+    /// when `EVENT_SYSTEM_MINIMIZEEND` fires for a window we hadn't
+    /// classified as minimized (e.g. we restarted while the user had
+    /// a minimized window).
+    #[test]
+    fn restoring_already_tiled_window_is_noop() {
+        let mut s = fresh();
+        s.apply(Event::WindowOpened {
+            info: WindowInfo::new(WindowId(1), "a", "A"),
+            monitor: MonitorId(1),
+            workspace: WorkspaceId(1),
+        }).unwrap();
+        let before = s.plan_for(MonitorId(1)).unwrap().placements.len();
+        s.apply(Event::WindowRestored { id: WindowId(1) }).unwrap();
+        let after = s.plan_for(MonitorId(1)).unwrap().placements.len();
+        assert_eq!(before, after);
+        assert!(!s.windows.get(&WindowId(1)).unwrap().floating);
+    }
+
     /// MonitorDetached on a multi-monitor setup used to crash the daemon
     /// with STATUS_STACK_BUFFER_OVERRUN when focus shifted to a monitor
     /// whose `active_workspace` had never been allocated as an actual
