@@ -42,6 +42,23 @@ const SKIP_CLASSES: &[&str] = &[
     "Button", // start menu button
     "TaskListThumbnailWnd",
     "TaskListOverlayWnd",
+
+    // Installers / setup wizards. These run at higher integrity than the
+    // daemon (UAC-elevated) so SetWindowPos returns E_ACCESSDENIED on every
+    // attempt. Even with the failure → auto-float safety net in the daemon,
+    // it's cleaner to never enter them into the layout to begin with —
+    // otherwise the user sees the tile shuffle once when their installer
+    // opens and once when we float it.
+    "ClaudeSetupProgress",       // Anthropic / Squirrel-style Electron installers
+    "MsiDialogCloseClass",       // Windows Installer (MSI) — main dialog
+    "MsiDialogNoCloseClass",     // Windows Installer (MSI) — no close box
+    "MsiDialogProgressClass",    // Windows Installer (MSI) — progress
+    "Nullsoft Installer",        // NSIS
+    "TWizardForm",               // Inno Setup
+    "TStartupForm",              // Inno Setup
+    "TUninstallProgressForm",    // Inno Setup uninstall
+    "InstallShield_Setup",       // InstallShield wizards
+    "InstallShield Wizard",      // InstallShield (older)
 ];
 
 pub fn class_of(hwnd: HWND) -> String {

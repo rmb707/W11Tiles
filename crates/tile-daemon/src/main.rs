@@ -345,7 +345,7 @@ async fn run() -> Result<()> {
                 // no applier call. Idle CPU goes from "60Hz no-op poll"
                 // to "wake up only when there's a layout change".
                 if let Some(frame) = animator.tick(std::time::Instant::now()) {
-                    let _ = applier.apply(&frame);
+                    apply_with_autofloat(&mut state, &applier, &mut animator, &map, &frame);
                 }
             }
             _ = reconcile_tick.tick(), if !animator.is_animating() && dragging_src.is_none() => {
@@ -355,7 +355,8 @@ async fn run() -> Result<()> {
                 // back to its tile cell mid-drag. We only reconcile when
                 // both (a) no tween is in flight and (b) the user isn't
                 // dragging anything.
-                let _ = applier.apply(&combined_plan(&state, &map));
+                let plan = combined_plan(&state, &map);
+                apply_with_autofloat(&mut state, &applier, &mut animator, &map, &plan);
             }
             _ = &mut shutdown => {
                 info!("shutdown signal received");
@@ -777,6 +778,31 @@ fn find_drop_target(
 }
 
 #[cfg(windows)]
+/// Run an applier pass and turn any UIPI-denied placements into permanent
+/// floats. Without this, an elevated installer (`Claude Setup`, MSI dialogs,
+/// etc.) traps the daemon in a tight loop: every reconcile tick we try
+/// SetWindowPos, the OS rejects us with E_ACCESSDENIED, we log a warning,
+/// and 250 ms later we do it all over again. Worse, the failed attempts
+/// still race the installer for window position, so the installer's UI
+/// renders half-drawn ("white image"). Floating the window makes the next
+/// combined_plan exclude it, so we stop touching it entirely and the
+/// surrounding tiles reclaim the freed cell.
+#[cfg(windows)]
+fn apply_with_autofloat(
+    state: &mut State,
+    applier: &Applier,
+    animator: &mut tile_core::animator::Animator,
+    map: &Arc<HwndMap>,
+    plan: &tile_core::LayoutPlan,
+) {
+    for id in applier.apply(plan) {
+        if state.windows.get(&id).map(|w| w.floating).unwrap_or(false) {
+            continue;
+        }
+        handle_event(state, applier, animator, map, CoreEvent::WindowFloated { id });
+    }
+}
+
 fn handle_event(
     state: &mut State,
     applier: &Applier,
