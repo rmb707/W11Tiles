@@ -104,6 +104,37 @@ impl HwndMap {
         let inner = self.inner.lock();
         inner.rev.iter().map(|(id, raw)| (*id, *raw)).collect()
     }
+
+    /// Atomic compound operation used by the hook's owner-of-tracked
+    /// dialog filter: in a single lock acquisition, check whether
+    /// `owner_raw` is currently tracked, and (if not) intern `child`.
+    /// Returns `None` if the owner *was* tracked (caller should drop
+    /// the child as a dialog), `Some(id)` if the child was interned.
+    ///
+    /// Doing this in two separate calls (`peek` then `intern`) opens
+    /// a window where another thread could free the owner between
+    /// our checks, and the child would slip into the layout as a
+    /// "normal" top-level window. With one mutex acquisition the
+    /// race is closed.
+    #[cfg(windows)]
+    pub fn intern_unless_owned(
+        &self,
+        child: HWND,
+        owner_raw: isize,
+    ) -> Option<WindowId> {
+        let mut inner = self.inner.lock();
+        if inner.fwd.contains_key(&owner_raw) {
+            return None;
+        }
+        let raw = child.0 as isize;
+        if let Some(id) = inner.fwd.get(&raw).copied() {
+            return Some(id);
+        }
+        let id = WindowId(self.next.fetch_add(1, Ordering::Relaxed));
+        inner.fwd.insert(raw, id);
+        inner.rev.insert(id, raw);
+        Some(id)
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +173,39 @@ mod tests {
         for id in &ids {
             assert_eq!(*id, first, "concurrent intern minted multiple ids: {ids:?}");
         }
+    }
+
+    /// intern_unless_owned must return None when the owner is currently
+    /// tracked, and must NOT have minted a new id for the child as a
+    /// side effect. Hook's confirmation-dialog filter depends on this.
+    #[cfg(windows)]
+    #[test]
+    fn intern_unless_owned_rejects_when_owner_tracked() {
+        use windows::Win32::Foundation::HWND;
+        let map = HwndMap::new();
+        let owner = HWND(0xAA00 as *mut _);
+        let child = HWND(0xAA01 as *mut _);
+        let _owner_id = map.intern(owner);
+        let next_before = map.next.load(Ordering::Relaxed);
+        let result = map.intern_unless_owned(child, owner.0 as isize);
+        assert!(result.is_none(), "owner is tracked; child must be rejected");
+        // Did NOT mint a new id for the child as a side effect.
+        let next_after = map.next.load(Ordering::Relaxed);
+        assert_eq!(next_before, next_after, "rejection must not bump next_id");
+        assert!(map.peek(child.0 as isize).is_none(), "child must not be tracked");
+    }
+
+    /// Same call when the owner is NOT tracked: must intern the child and
+    /// return its fresh WindowId. Subsequent calls return the same id.
+    #[cfg(windows)]
+    #[test]
+    fn intern_unless_owned_admits_when_owner_unknown() {
+        use windows::Win32::Foundation::HWND;
+        let map = HwndMap::new();
+        let child = HWND(0xBB01 as *mut _);
+        // owner_raw = 0 (no owner): caller signals "no parent to check."
+        let id1 = map.intern_unless_owned(child, 0).expect("should admit");
+        let id2 = map.intern_unless_owned(child, 0).expect("should admit");
+        assert_eq!(id1, id2, "re-call must return the same id");
     }
 }
