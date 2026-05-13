@@ -277,6 +277,17 @@ async fn run() -> Result<()> {
     let mut reconcile_tick = tokio::time::interval(std::time::Duration::from_millis(250));
     reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dragging_src: Option<tile_core::WindowId> = None;
+    // Cache of the last plan we handed to the applier. The reconcile
+    // tick compares each new plan against this and skips the
+    // SetWindowPos pass entirely when nothing changed. Two wins:
+    //  - No more 250 ms apply loop running while the layout is steady,
+    //    which on laptops was waking the GPU and burning battery.
+    //  - Shrinks the surface where reconcile can fight a user-initiated
+    //    edge resize: if the user is moving a window via Aero Snap
+    //    (which doesn't fire MOVESIZESTART so dragging_src stays None),
+    //    the plan isn't changing, so reconcile no longer snaps the
+    //    window back every quarter second.
+    let mut last_reconciled_plan: Option<tile_core::LayoutPlan> = None;
 
     loop {
         tokio::select! {
@@ -399,7 +410,15 @@ async fn run() -> Result<()> {
                 // both (a) no tween is in flight and (b) the user isn't
                 // dragging anything.
                 let plan = combined_plan(&state, &map);
-                apply_with_autofloat(&mut state, &applier, &mut animator, &map, &plan);
+                // Skip the apply when the plan is byte-identical to the
+                // last one we applied. Plan equality => no SetWindowPos
+                // calls => no GPU wake-ups, no chance of reconcile
+                // racing user-initiated motion that hasn't changed the
+                // BSP. Plan inequality => apply and update cache.
+                if last_reconciled_plan.as_ref() != Some(&plan) {
+                    apply_with_autofloat(&mut state, &applier, &mut animator, &map, &plan);
+                    last_reconciled_plan = Some(plan);
+                }
             }
             _ = &mut shutdown => {
                 info!("shutdown signal received");

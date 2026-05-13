@@ -180,23 +180,31 @@ unsafe extern "system" fn callback(
             // catches the WS_EX_APPWINDOW-less cases; this catches dialogs
             // that incorrectly mark themselves WS_EX_APPWINDOW (some games,
             // some Electron apps), which otherwise slip through.
-            unsafe {
+            //
+            // The owner-check and the intern of the child both run under
+            // the same HwndMap mutex via `intern_unless_owned` — without
+            // that, a race where the owner gets forgotten between our
+            // `peek` and our `intern` could let a dialog mint a fresh
+            // WindowId and slip into the layout as a top-level window.
+            let owner_raw: isize = unsafe {
                 use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_OWNER};
-                if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
-                    if !owner.is_invalid() {
-                        let owner_raw = owner.0 as isize;
-                        if ctx.map.peek(owner_raw).is_some() {
-                            tracing::debug!(
-                                class = %class_of(hwnd),
-                                title = %title_of(hwnd),
-                                "skipping owned-by-tracked: looks like a dialog"
-                            );
-                            return;
-                        }
-                    }
+                GetWindow(hwnd, GW_OWNER)
+                    .ok()
+                    .filter(|h| !h.is_invalid())
+                    .map(|h| h.0 as isize)
+                    .unwrap_or(0)
+            };
+            let id = match ctx.map.intern_unless_owned(hwnd, owner_raw) {
+                Some(id) => id,
+                None => {
+                    tracing::debug!(
+                        class = %class_of(hwnd),
+                        title = %title_of(hwnd),
+                        "skipping owned-by-tracked: looks like a dialog"
+                    );
+                    return;
                 }
-            }
-            let id = ctx.map.intern(hwnd);
+            };
             let info = WindowInfo::new(id, title_of(hwnd), class_of(hwnd));
             Some(HookEvent::Opened { raw_hwnd, id, info })
         }

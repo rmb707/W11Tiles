@@ -37,6 +37,15 @@ use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINF
 /// reads as the same brand-color square as the rest of our chrome.
 const ICON_BG_BGR: u32 = 0x00B05010;
 
+/// `SelectObject` returns `HGDI_ERROR` (`(HGDIOBJ)-1` = `0xFFFFFFFFFFFFFFFF`)
+/// on failure. windows-rs's `is_invalid()` only checks for null, so the
+/// sentinel slips through. Restoring a DC with that handle is undefined
+/// behavior — we treat it as failure explicitly.
+#[inline]
+fn is_hgdi_error(h: HGDIOBJ) -> bool {
+    h.0 as isize == -1
+}
+
 /// Build a 32×32 ARGB icon containing a centered white "TM" on an
 /// accent-color square. Caller owns the returned `HICON` — call
 /// `DestroyIcon` on shutdown if you want to be tidy. (`Shell_NotifyIcon`
@@ -86,7 +95,18 @@ pub fn create_app_icon() -> Option<HICON> {
             ReleaseDC(HWND::default(), screen_dc);
             return None;
         }
+        // SelectObject returns either the previously-selected object OR
+        // HGDI_ERROR (a sentinel that is_invalid() does NOT recognize as
+        // invalid — it's non-null). Restoring the DC with that sentinel
+        // is undefined behavior. Treat HGDI_ERROR as failure and abort
+        // before we paint into a DC we don't own.
         let prev_bmp = SelectObject(mem_dc, color_bmp);
+        if is_hgdi_error(prev_bmp) {
+            let _ = DeleteDC(mem_dc);
+            let _ = DeleteObject(color_bmp);
+            ReleaseDC(HWND::default(), screen_dc);
+            return None;
+        }
 
         // Fill the whole icon with the accent color. The DIB came back
         // zero-initialized (alpha = 0 everywhere) so we need to paint
@@ -119,7 +139,13 @@ pub fn create_app_icon() -> Option<HICON> {
             (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR(face.as_ptr()),
         );
-        let prev_font = if !font.is_invalid() { SelectObject(mem_dc, font) } else { HGDIOBJ::default() };
+        let prev_font = if !font.is_invalid() {
+            let p = SelectObject(mem_dc, font);
+            // Same HGDI_ERROR concern as the bitmap above. If selecting
+            // the font failed, leave `prev_font` defaulted so the
+            // restore-on-cleanup path treats it as "nothing to restore."
+            if is_hgdi_error(p) { HGDIOBJ::default() } else { p }
+        } else { HGDIOBJ::default() };
 
         let mut text: Vec<u16> = "TM".encode_utf16().collect();
         let mut text_rect = rect;
@@ -158,7 +184,13 @@ pub fn create_app_icon() -> Option<HICON> {
         let hicon = CreateIconIndirect(&icon_info);
 
         // Restore + cleanup. The DIB section and font outlive selection.
-        if !prev_font.is_invalid() { SelectObject(mem_dc, prev_font); }
+        // `prev_bmp` is guaranteed non-error here (we bailed earlier if
+        // SelectObject returned HGDI_ERROR), so we can restore it
+        // unconditionally. `prev_font` may legitimately be the default
+        // null handle if font creation failed — skip restoring in that case.
+        if !prev_font.is_invalid() && !is_hgdi_error(prev_font) {
+            SelectObject(mem_dc, prev_font);
+        }
         SelectObject(mem_dc, prev_bmp);
         if !font.is_invalid()  { let _ = DeleteObject(font); }
         let _ = DeleteObject(mask_bmp);

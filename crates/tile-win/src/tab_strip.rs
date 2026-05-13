@@ -475,18 +475,29 @@ unsafe fn paint_strip(hwnd: HWND) {
     }
     let tab_w = (total_w / count).max(1);
 
-    // Native Win11-style colors. BGR byte order, not RGB.
-    let bg_inactive = CreateSolidBrush(COLORREF(0x00282828)); // dark gray
-    let bg_active   = CreateSolidBrush(COLORREF(ACCENT_BGR)); // accent
-    let separator   = CreateSolidBrush(COLORREF(0x00404040)); // mid gray
-    let stripe_color = CreateSolidBrush(COLORREF(0x00FFFFFF)); // top stripe on active
+    // Native Win11-style colors. BGR byte order, not RGB. Wrapped in
+    // GdiHandle so they Drop-clean even if a future maintainer adds an
+    // early return inside the paint loop — leaks here are catastrophic
+    // (the system-wide GDI handle table caps at ~16K and won't recover
+    // without a logoff). Audit at PR-time: never call `.into_inner()`
+    // and never store these handles elsewhere.
+    let bg_inactive  = GdiHandle::new(CreateSolidBrush(COLORREF(0x00282828))); // dark gray
+    let bg_active    = GdiHandle::new(CreateSolidBrush(COLORREF(ACCENT_BGR)));  // accent
+    let separator    = GdiHandle::new(CreateSolidBrush(COLORREF(0x00404040))); // mid gray
+    let stripe_color = GdiHandle::new(CreateSolidBrush(COLORREF(0x00FFFFFF))); // top stripe on active
 
     SetBkMode(hdc, TRANSPARENT);
 
     // Real font: Segoe UI 9pt is what Windows 11 uses for its own chrome.
     // Without this, GDI defaults to System (a chunky 90s pixel font).
     let font = create_strip_font();
-    let prev_font = if !font.is_invalid() { SelectObject(hdc, font) } else { HGDIOBJ::default() };
+    // Same HGDI_ERROR sentinel handling as `icon.rs`: SelectObject
+    // returns (HGDIOBJ)-1 on failure, and `is_invalid()` only matches
+    // null — restoring with the sentinel is undefined behavior.
+    let prev_font = if !font.is_invalid() {
+        let p = SelectObject(hdc, font);
+        if is_hgdi_error(p) { HGDIOBJ::default() } else { p }
+    } else { HGDIOBJ::default() };
 
     // Whether the close-X is shown depends on per-tab width. With many
     // tabs the per-tab width drops below `MIN_TAB_W_FOR_CLOSE` and the
@@ -498,13 +509,13 @@ unsafe fn paint_strip(hwnd: HWND) {
         let x1 = if i as i32 == count - 1 { total_w } else { x0 + tab_w };
         let active = i == ov.descriptor.active;
         let mut tab_rect = RECT { left: x0, top: 0, right: x1, bottom: total_h };
-        let brush = if active { bg_active } else { bg_inactive };
+        let brush = if active { bg_active.handle() } else { bg_inactive.handle() };
         FillRect(hdc, &tab_rect, brush);
 
         // 1-px separator between tabs (skip after the last).
         if i as i32 != count - 1 {
             let sep = RECT { left: x1 - 1, top: 0, right: x1, bottom: total_h };
-            FillRect(hdc, &sep, separator);
+            FillRect(hdc, &sep, separator.handle());
         }
 
         // Active tab gets a 2-px accent stripe along the bottom edge AND
@@ -513,9 +524,9 @@ unsafe fn paint_strip(hwnd: HWND) {
         // Win11's command-bar pills work but with stronger emphasis.
         if active {
             let bottom_stripe = RECT { left: x0, top: total_h - 2, right: x1, bottom: total_h };
-            FillRect(hdc, &bottom_stripe, bg_active);
+            FillRect(hdc, &bottom_stripe, bg_active.handle());
             let top_stripe = RECT { left: x0, top: 0, right: x1, bottom: 2 };
-            FillRect(hdc, &top_stripe, stripe_color);
+            FillRect(hdc, &top_stripe, stripe_color.handle());
         }
 
         // Inset for text + ellipsis. Active text pure white; inactive
@@ -552,13 +563,52 @@ unsafe fn paint_strip(hwnd: HWND) {
         }
     }
 
-    if !prev_font.is_invalid() { SelectObject(hdc, prev_font); }
-    if !font.is_invalid()      { let _ = DeleteObject(font); }
-    let _ = DeleteObject(bg_inactive);
-    let _ = DeleteObject(bg_active);
-    let _ = DeleteObject(separator);
-    let _ = DeleteObject(stripe_color);
+    if !prev_font.is_invalid() && !is_hgdi_error(prev_font) {
+        SelectObject(hdc, prev_font);
+    }
+    if !font.is_invalid() { let _ = DeleteObject(font); }
+    // bg_inactive / bg_active / separator / stripe_color are GdiHandle
+    // values; their Drop impl calls DeleteObject for us. The order
+    // matters less than guaranteeing the call happens on every path.
+    drop(bg_inactive);
+    drop(bg_active);
+    drop(separator);
+    drop(stripe_color);
     let _ = EndPaint(hwnd, &ps);
+}
+
+/// HGDI_ERROR ((HGDIOBJ)-1) sentinel check. `SelectObject` returns
+/// this on failure instead of null, and windows-rs `is_invalid()`
+/// only catches null — restoring a DC with the sentinel is undefined
+/// behavior, so callers should treat it as failure.
+#[inline]
+fn is_hgdi_error(h: HGDIOBJ) -> bool {
+    h.0 as isize == -1
+}
+
+/// RAII wrapper around a GDI brush handle. `DeleteObject` runs on
+/// drop, guaranteeing handle release even if a panic or future early
+/// return unwinds out of the paint loop. The GDI handle table is
+/// process-wide and finite (~16K total, ~10K typical per-process); a
+/// single leak loop here can starve the whole shell.
+///
+/// Only brushes are wrapped because that's all `paint_strip` allocates
+/// in the loop body. Fonts are handled separately (need
+/// SelectObject-then-DeleteObject pairing).
+struct GdiHandle(windows::Win32::Graphics::Gdi::HBRUSH);
+
+impl GdiHandle {
+    fn new(h: windows::Win32::Graphics::Gdi::HBRUSH) -> Self { Self(h) }
+    fn handle(&self) -> windows::Win32::Graphics::Gdi::HBRUSH { self.0 }
+}
+
+impl Drop for GdiHandle {
+    fn drop(&mut self) {
+        let h: HGDIOBJ = self.0.into();
+        if !h.is_invalid() && !is_hgdi_error(h) {
+            unsafe { let _ = DeleteObject(h); }
+        }
+    }
 }
 
 /// Paint a small X glyph centered in the close-button hit-zone of a tab

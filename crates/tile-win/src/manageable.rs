@@ -96,6 +96,19 @@ const SKIP_CLASSES: &[&str] = &[
     "EasyAntiCheat",
     "BethBlue",                  // Bethesda launcher splash
     "Splash Screen",             // generic splash class used by some apps
+
+    // Microsoft Office modeless dialogs. Word/Excel/PowerPoint show
+    // "Insert Object", "Format Cells", "Properties", etc. as unowned
+    // WS_POPUP frames that don't trip the dialog-style heuristic
+    // (they're resizable; have WS_MAXIMIZEBOX). They also don't share
+    // the host's main-window class (OpusApp / XLMAIN / PPTFrameClass),
+    // so the user can still tile Office documents — only the popup
+    // sub-dialogs get filtered.
+    "NUIDialog",                 // Word "Insert Object", Excel "Format Cells", etc.
+    "bosa_sdm_msword",           // Office object picker (legacy class kept around)
+    "bosa_sdm_XL9",              // Excel-specific variant of bosa_sdm
+    "_WwG",                      // Word inner-frame popups (occasionally surface as top-level)
+    "MsoCommandBarPopup",        // Office ribbon overflow popups
 ];
 
 /// Style bit values copied from `winuser.h`. windows-rs exposes these as

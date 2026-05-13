@@ -74,7 +74,18 @@ impl Monitor {
             return self.workspaces.iter_mut().find(|w| w.id == id).unwrap();
         }
         // Self-heal: re-anchor to the first existing workspace rather than panic.
+        // Loud-warn so the user sees the workspace-id drift in the log;
+        // the apparent VD they were on can change (the surviving monitor's
+        // workspace replaces the missing one). Without the warning the
+        // self-heal is invisible and the user would think their VD
+        // bookmark "just disappeared."
         if let Some(first) = self.workspaces.first().map(|w| w.id) {
+            tracing::warn!(
+                monitor = ?self.id,
+                from = ?self.active_workspace,
+                to = ?first,
+                "self-healing stale active_workspace; user may see a workspace switch"
+            );
             self.active_workspace = first;
             return self.workspaces.iter_mut().find(|w| w.id == first).unwrap();
         }

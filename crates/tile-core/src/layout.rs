@@ -90,7 +90,7 @@ pub struct Placement {
 
 /// Computed plan for an entire workspace — the daemon hands this to the
 /// applier which translates it into `SetWindowPos` calls.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutPlan {
     pub placements: Vec<Placement>,
 }

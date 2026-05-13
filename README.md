@@ -5,7 +5,7 @@ A native Windows 11 tiling window manager — pop-shell / Hyprland feel, Win32 u
 Drag windows together to create tab groups. Drag onto an edge to split a tile in any direction. Per–virtual-desktop layouts that survive `Ctrl+Win+Arrow` switches. Animated transitions. System-tray controls. Built in Rust against `windows-rs`, no MSVC required to build.
 
 ![status](https://img.shields.io/badge/status-pre--alpha-orange)
-![tests](https://img.shields.io/badge/tests-60%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-73%20passing-brightgreen)
 ![rust](https://img.shields.io/badge/rust-1.78%2B-orange)
 ![target](https://img.shields.io/badge/target-x86__64--pc--windows--gnu-blue)
 
